@@ -1,0 +1,9 @@
+Summary:
+
+- Code pushed to https://github.com/yen93/sales_proposals_automation (private), with .env, the OAuth client secret JSON, and local Claude settings all excluded via .gitignore.
+- Cloud routine created: sales-proposals-automation-hourly, running every hour at :42 past. It writes its own .env from the credentials embedded in its stored prompt, pip installs, and runs python main.py.
+- Routine link: https://claude.ai/code/routines/trig_01KNnjdscJ1KpMTEKqneqs1S — use this to pause/edit it, or to check run history.
+
+Two things worth keeping in mind going forward:
+1. Credential exposure: as discussed, the 4 credentials live in plaintext in this routine's stored prompt (retrievable via the routines API) since there's no secrets vault for cloud routines. If any of these are rotated or you want to tighten this later, the routine will need updating.
+2. Refresh token lifetime: if your Google Cloud OAuth consent screen is still in "Testing" mode (unverified app), Google auto-expires refresh tokens after ~7 days — the routine's prompt already tells it to report that clearly if it happens, so you'd see it fail with an auth error and need to re-run oauth_setup.py locally and update the routine with a fresh token. If you want this to be permanent/unattended long-term, publishing the OAuth consent screen (or verifying the app) would avoid that.

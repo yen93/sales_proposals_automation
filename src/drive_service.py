@@ -1,6 +1,9 @@
 """Drive folder creation and template duplication (Steps 4-5)."""
 
+import io
 from datetime import datetime
+
+from googleapiclient.http import MediaIoBaseUpload
 
 import config
 
@@ -50,6 +53,24 @@ def create_client_folder(drive, client_org: str, year: int = None) -> dict:
         .execute()
     )
     return {"folder_id": created["id"], "folder_name": folder_name}
+
+
+def upload_file(drive, folder_id: str, filename: str, content_bytes: bytes, mime_type: str) -> dict:
+    """Uploads raw bytes (e.g. the original demo-notes attachment) into a
+    client's Drive folder. Returns {file_id, view_url}."""
+    media = MediaIoBaseUpload(io.BytesIO(content_bytes), mimetype=mime_type)
+    created = (
+        drive.files()
+        .create(
+            body={"name": filename, "parents": [folder_id]},
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+    file_id = created["id"]
+    return {"file_id": file_id, "view_url": f"https://drive.google.com/file/d/{file_id}/view"}
 
 
 def duplicate_template(drive, template_id: str, folder_id: str, new_name: str) -> dict:

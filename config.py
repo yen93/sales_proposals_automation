@@ -50,6 +50,9 @@ GMAIL_TRIGGER_QUERY = os.environ.get(
 )
 FALLBACK_TEMPLATE_ID = os.environ.get("FALLBACK_TEMPLATE_ID", "")
 
+FATHOM_API_KEY = os.environ.get("FATHOM_API_KEY", "")
+FATHOM_LOOKBACK_DAYS = int(os.environ.get("FATHOM_LOOKBACK_DAYS", "30"))
+
 SUPABASE_LOG_TABLE = "proposal_demo_notes_email_logs"
 
 GOOGLE_SCOPES = [

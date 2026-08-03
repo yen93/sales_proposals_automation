@@ -2,9 +2,10 @@
 matching email found on a single run."""
 
 import logging
+import mimetypes
 
 import config
-from src import drive_service, gmail_service, logo_service, ocr_service, slides_rewriter, supabase_service, template_selector
+from src import drive_service, fathom_service, gmail_service, logo_service, ocr_service, slides_rewriter, supabase_service, template_selector
 from src.google_clients import GoogleClients
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -51,14 +52,26 @@ def process_email(clients: GoogleClients, supabase, message_id: str, attachment:
             supabase_service.mark_processed(supabase, message_id, status="error", error_message=reason)
             return
 
+        fathom_notes = fathom_service.find_matching_notes(ocr_fields)
+        if fathom_notes:
+            ocr_fields["fathom_meeting_notes"] = fathom_notes
+
         selection = template_selector.pick_template(drive, ocr_fields)
         template_id = selection["template_id"]
         if selection["confidence"] == "low" and config.FALLBACK_TEMPLATE_ID:
             template_id = config.FALLBACK_TEMPLATE_ID
 
         folder = drive_service.create_client_folder(drive, client_org)
+
+        notes_ext = mimetypes.guess_extension(attachment["mime_type"]) or ""
+        drive_service.upload_file(
+            drive, folder["folder_id"], f"{client_org} Demo Call Notes{notes_ext}",
+            image_bytes, attachment["mime_type"],
+        )
+
         duplicate = drive_service.duplicate_template(
-            drive, template_id, folder["folder_id"], new_name=f"{client_org} Proposal"
+            drive, template_id, folder["folder_id"],
+            new_name=f"{client_org} Proposal - {proposal_type}",
         )
 
         logo = logo_service.find_logo_url(client_org)
