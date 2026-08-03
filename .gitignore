@@ -1,0 +1,6 @@
+.env
+.google_token.json
+claudegwscli-client_secret_*.json
+__pycache__/
+*.pyc
+.claude/

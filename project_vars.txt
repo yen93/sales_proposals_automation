@@ -1,0 +1,12 @@
+[
+  {
+    "demo_notes_recipients": [
+      "julienne@myadventuregroup.com.au"
+    ],
+    "notification_recipients": [
+      "julienne@myadventuregroup.com.au"
+    ],
+    "proj_drive_link": "https://drive.google.com/drive/u/0/folders/16xjpO2qFGxPBXRvirx86hc_kmnyXALq6",
+    "templates_drive_link": "https://drive.google.com/drive/u/0/folders/1kKdzQRH6lgkwOe7DtcRgGbTHfG7gxXyp"
+  }
+]

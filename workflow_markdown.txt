@@ -1,0 +1,115 @@
+Note: All variable values are in C:\Users\Cloverly\claude_code\sales_proposals_automation\project_vars.txt
+
+====================================================================
+WORKFLOW AUTOMATION SPECIFICATION: AUTOMATED SALES PROPOSAL GENERATOR
+====================================================================
+
+GOAL
+----
+Automatically generate a customized sales proposal in Google Slides based on
+handwritten demo call notes received via email, using pre-defined templates,
+and organize the output in Google Drive.
+
+
+INTEGRATION & PREREQUISITES
+----------------------------
+- Email Provider: Gmail API / IMAP
+- OCR Service: Vision API / Claude API (with image input)
+- Storage: Google Drive API
+- Presentation Tool: Google Slides API
+
+
+TECHNICAL SPECIFICATIONS & STACK REQUIREMENTS
+----------------------------------------------
+- Primary Assistant Interface: Claude Code CLI
+- Language/Framework: Node.js (TypeScript) or Python 3.10+
+- Integrations:
+  - Gmail API: Email monitoring and attachment extraction
+  - Vision / OCR (Claude API or Google Cloud Vision): Handwriting-to-text conversion
+  - Google Drive API: Folder navigation and creation
+  - Google Slides API: Presentation duplication, text manipulation, and image replacement
+
+
+DETAILED WORKFLOW ARCHITECTURE
+--------------------------------
+[ Gmail Trigger Filter ]
+        |
+        v
+[ Step 1: Send Notification Thread ]
+        |
+        v
+[ Step 2: Scan & Transcribe Attachment ]
+        |
+        v
+[ Step 3: Determine Best Proposal Template ]
+        |
+        v
+[ Step 4: Create Destination Folder on Drive ]
+        |
+        v
+[ Step 5: Duplicate & Customize Proposal Slides ]
+        |
+        v
+[ Step 6: Send Final Notification ]
+
+
+TRIGGER CRITERIA
+-----------------
+1. Filter query: has:attachment after:2026/07/19 subject:("attached image")
+   Action: Extract single-page handwritten image attachment.
+2. Check that the email ID is NOT in the Supabase table
+   proposal_demo_notes_email_logs where is_processed = true.
+
+
+EXECUTION STEPS
+-----------------
+
+Step 1: Send Notification Thread
+- Create a Gmail thread with the subject line:
+  Automation: [PROPOSAL TYPE] for [CLIENT ORG/COMPANY NAME]
+- Body: "Automated proposal creation for [CLIENT] has been started. You will
+  be notified through this same email thread once done."
+
+Step 2: Document OCR & Entity Extraction
+- Download the single-page handwritten attachment.
+- Process through an OCR engine (e.g., Claude 3.5 Sonnet Vision capabilities).
+- Extract all fields.
+
+Step 3: Template Selection
+- Query available templates from the Google Drive folder: templates_drive_link
+- Evaluate the extracted recommended_service against available slide templates.
+- Select the matching template_id.
+
+Step 4: Folder Structure Setup
+- Navigate to the master output Google Drive folder: proj_drive_link
+- Create a new subfolder using the convention: [CLIENT ORG/COMPANY NAME] [YEAR]
+  (Example: Acme Corp 2026)
+
+Step 5: Presentation Duplication & Mutation
+- Duplicate the selected Google Slides template into the newly created folder.
+- Execute batch update requests via the Google Slides API:
+  - Replace placeholder text fields ({{CLIENT_NAME}}, {{SUMMARY}}, {{SCOPE}}, etc.)
+    with data derived from the OCR transcript.
+  - Locate template logo placeholder shapes and replace images with client logos.
+
+Step 6: Final Notification
+- In the same Gmail thread, say: "The proposal for [CLIENT] is ready: [LINK]"
+
+
+INSTRUCTIONS FOR CLAUDE CODE EXECUTION
+-----------------------------------------
+1. Build a service or script using the defined workflow architecture.
+2. Ensure environment variables (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+   GMAIL_TOKEN, ANTHROPIC_API_KEY) are properly loaded from .env.
+3. Implement robust error handling for unreadable handwriting and missing
+   parameters.
+
+
+EXPECTED OUTPUT
+-----------------
+1. Google Drive storage: A newly generated directory in the master drive
+   root, formatted as [CLIENT ORG/COMPANY NAME] [YEAR].
+2. Sales proposal document: A duplicated Google Slides file tailored to the
+   client, placed inside the new folder.
+   - Text contents generated/updated based on transcribed demo notes.
+   - Company logos updated appropriately.
