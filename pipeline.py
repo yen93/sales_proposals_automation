@@ -75,19 +75,38 @@ def process_email(clients: GoogleClients, supabase, message_id: str, attachment:
         )
 
         logo = logo_service.find_logo_url(client_org)
-        slides_rewriter.rewrite(slides, duplicate["file_id"], ocr_fields, logo_url=logo["logo_url"])
+        rewrite_result = slides_rewriter.rewrite(
+            slides, duplicate["file_id"], ocr_fields, logo_url=logo["logo_url"]
+        )
 
-        gmail_service.reply_in_thread(
-            gmail,
-            thread_id,
-            notification_message_id,
-            subject,
-            f"The proposal for {client_org} is ready: {duplicate['view_url']}",
-        )
+        # Pre-send QA: never blocks sending, just flags what a human should
+        # double-check before this goes out to a real client.
+        qa_notes = []
+        if logo["logo_url"] and not rewrite_result["logo_replaced"]:
+            qa_notes.append("client logo was found but could not be placed on the slides")
+        if rewrite_result["overflow_risk_ids"]:
+            qa_notes.append(
+                f"{len(rewrite_result['overflow_risk_ids'])} slide text box(es) may overflow their layout"
+            )
+
+        ready_message = f"The proposal for {client_org} is ready: {duplicate['view_url']}"
+        if qa_notes:
+            ready_message += (
+                "\n\nNote: please double-check this deck before sharing externally — "
+                + "; ".join(qa_notes) + "."
+            )
+
+        gmail_service.reply_in_thread(gmail, thread_id, notification_message_id, subject, ready_message)
         supabase_service.mark_processed(
-            supabase, message_id, status="success", proposal_link=duplicate["view_url"]
+            supabase, message_id,
+            status="needs_review" if qa_notes else "success",
+            proposal_link=duplicate["view_url"],
+            error_message="; ".join(qa_notes) if qa_notes else None,
         )
-        log.info("Processed %s -> %s", message_id, duplicate["view_url"])
+        log.info(
+            "Processed %s -> %s%s", message_id, duplicate["view_url"],
+            " (needs review: " + "; ".join(qa_notes) + ")" if qa_notes else "",
+        )
 
     except Exception as exc:
         log.exception("Pipeline failed for message %s", message_id)

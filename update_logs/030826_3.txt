@@ -1,0 +1,7 @@
+All 3 modifications are built, verified locally, pushed to GitHub, and the cloud routine is updated with the new code and FATHOM_API_KEY:
+
+1. Demo notes upload — the original attachment gets saved into the client's Drive folder as {client} Demo Call Notes.{ext}.
+2. Proposal naming — generated proposals are now named {client} Proposal - {service type}.
+3. Fathom enrichment — the pipeline looks up recent Fathom recordings, has Claude match the right one to the client (name/contact/date), and feeds its transcript/summary/action-items into both template selection and slide rewriting — so pricing and special requests mentioned on the actual call flow into the deck. If no confident match is found, it proceeds normally rather than blocking.
+
+One thing worth knowing: since matching happens via title/invitee/date proximity rather than an exact ID, it's not foolproof — worth spot-checking the first few real proposals to confirm it's picking up the right call before trusting it fully unattended.
