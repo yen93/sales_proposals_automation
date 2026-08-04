@@ -1,0 +1,25 @@
+Prompt:
+
+so i checked the proposal the automation created and it seems the client company logo is not there yet, can you do something about it? so the slides that need the logo are 3-7 and 11. link: https://docs.google.com/presentation/d/1UUzobuzwFvV15sB7ChIjPiCk2Jv2udpI8I_uIqoUcYM/edit?slide=id.g2f9f83c7bbf_0_768#slide=id.g2f9f83c7bbf_0_768
+
+---
+
+All fixed and verified:
+
+1. src/logo_service.py — replaced the dead logo.clearbit.com call with Google's favicon endpoint (confirmed working, free, no signup).
+2. pipeline.py — the QA check now flags needs_review when no logo can be found at all, not just when a found logo fails to place, so this silent-failure mode can't happen again.
+3. The Viscount proposal — patched directly via the Slides API; all 6 logo placeholders (slides 3, 4, 5, 6, 7, 11) now have the logo image in place. Confirmed via re-inspection — all 6 now show has_content_url=True.
+
+One thing worth knowing: replaceImage cleared the client_logo alt-text tag on those 6 shapes in this specific generated copy (now desc=None). That's harmless here since this deck is already marked processed and won't be touched by the pipeline again — but it means the tag is a one-time-use marker per generated deck, not something that persists after a logo's been placed. The reusable master template itself is untouched, so future proposals duplicated from it will still tag correctly.
+
+Given this bug likely affected every proposal since Clearbit went dark, you may want to spot-check a few other recent decks for the same silent miss — happy to do that next if you want to give me links, or I can search Supabase for all status='success' rows and check them systematically.
+
+---
+
+moving forward, new proposals should get logos automatically. Here's why:
+
+1. The fetch itself is fixed. logo_service.py now calls Google's favicon endpoint instead of the dead logo.clearbit.com, and I confirmed it returns a real, distinct image for actual domains — that's the piece that was silently failing before.
+2. The placeholder tagging is untouched. The client_logo tags live on the reusable master templates (e.g., the Uncharted Ice deck), not on individual generated copies — so every new proposal duplicated from those templates will still have taggable logo placeholder shapes, exactly as before.
+3. Misses are no longer invisible. Even with a working fetch, the domain-guessing heuristic (client name → guessed domain) can still occasionally fail to find a match for an unusual company name. Previously that failure was swallowed silently and shipped as status: success. Now it flags status: needs_review with a clear note, both in Supabase and in the notification email — so if it ever does miss, a human will actually see it instead of it slipping through unnoticed like this one did.
+
+So: normal case, logo appears automatically. Edge case (domain guess doesn't match), you'll be told to add it manually rather than finding out by chance later.

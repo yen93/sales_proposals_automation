@@ -82,7 +82,9 @@ def process_email(clients: GoogleClients, supabase, message_id: str, attachment:
         # Pre-send QA: never blocks sending, just flags what a human should
         # double-check before this goes out to a real client.
         qa_notes = []
-        if logo["logo_url"] and not rewrite_result["logo_replaced"]:
+        if not logo["logo_url"]:
+            qa_notes.append("no client logo could be found automatically — add one manually if needed")
+        elif not rewrite_result["logo_replaced"]:
             qa_notes.append("client logo was found but could not be placed on the slides")
         if rewrite_result["overflow_risk_ids"]:
             qa_notes.append(

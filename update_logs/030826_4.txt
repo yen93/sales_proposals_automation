@@ -1,0 +1,8 @@
+Summary of what changed:
+
+1. Bullets — root cause was the pipeline itself (a blunt delete-all-text + insert-new-text on every rewrite), not the template. Fixed in slides_rewriter.py to detect and reapply bullet formatting after rewriting.
+2. Logo placeholder — tagged the 6 existing-but-untagged placeholder shapes in the Uncharted Ice master template (slides 3-7, 11) with client_logo, so the logo-matching code that already existed can finally find them. Confirmed via direct detection test.
+3. Slide 11 overflow — was genuinely per-client text-length overflow, not a static misalignment. Since the Slides API turned out not to support autofit at all ("Autofit types other than NONE are not supported" — confirmed this the hard way), I added a tighter length constraint in the rewrite prompt plus a font-size-shrink fallback for any shape that still comes back long.
+4. Pre-send QA step — added to pipeline.py, checks for a missing logo or residual overflow risk right before the "ready" email goes out; flags via status="needs_review" in Supabase and a note in the Gmail body rather than blocking the send.
+
+The other 3 templates were audited too — none had the logo-placeholder bug, and only Uncharted Ice had the bullet issue, but the bullet-preservation fix now protects all templates going forward regardless.

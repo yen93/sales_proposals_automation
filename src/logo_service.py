@@ -1,4 +1,9 @@
-"""Best-effort client logo lookup via the Clearbit free logo endpoint."""
+"""Best-effort client logo lookup via Google's public favicon endpoint.
+
+Previously used logo.clearbit.com, which was discontinued (the domain no
+longer resolves at all as of 2026-08). Favicons are lower-fidelity than a
+dedicated brand-logo API and this endpoint is undocumented, but it's free,
+requires no signup, and is currently reliable."""
 
 import re
 
@@ -26,7 +31,7 @@ def find_logo_url(client_org: str) -> dict:
     candidate domain resolved to an actual logo image. Never raises —
     a miss here should not fail the whole pipeline."""
     for domain in _guess_domains(client_org):
-        url = f"https://logo.clearbit.com/{domain}"
+        url = f"https://www.google.com/s2/favicons?domain={domain}&sz=256"
         try:
             resp = requests.get(url, timeout=10)
         except requests.RequestException:
