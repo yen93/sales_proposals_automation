@@ -1,0 +1,12 @@
+All 4 templates now have a tagged slide-1 logo placeholder. Here's the full summary of what's done:
+
+Logo placeholder, slide 1 — all 4 templates:
+- Uncharted Ice (the one used for your Viscount example): tagged the image you'd just manually added yourself while we were talking (sourced from Wikimedia) as client_logo.
+- Uncharted Waters: had no image on slide 1 at all — inserted a new one at the same position/scale already used by the other two templates, tagged client_logo.
+- Crossing the Ditch / Crossing the Ice Keynote: both already had an untagged image on slide 1 matching the exact size/scale fingerprint of the logo spots elsewhere — tagged it client_logo.
+
+"[CLIENT] [EVENT NAME]" text, slide 1:
+- You'd already added a text box with literal [CLIENT]\n[EVENT NAME] to the Uncharted Ice template. Updated the rewrite prompt in slides_rewriter.py to explicitly instruct Claude to replace bracketed placeholder tokens like [CLIENT]/[EVENT NAME] with real values, rather than leaving them literal.
+- Also added an instruction covering the other 3 templates' cover-slide titles (currently generic, e.g. "CROSSING THE DITCH"), so Claude now personalizes them to name both the client and program (e.g. "Viscount x Crossing The Ditch") instead of leaving them as boilerplate.
+
+One thing worth knowing: since these are prompt-level instructions (not hardcoded per-shape logic), the actual output wording is still Claude's judgment call each time — worth a quick visual spot-check on the first proposal or two generated from each template to confirm it reads naturally.
