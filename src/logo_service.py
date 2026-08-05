@@ -1,9 +1,22 @@
-"""Best-effort client logo lookup via Google's public favicon endpoint.
+"""Best-effort client logo lookup: probes DuckDuckGo's favicon endpoint to
+detect a hit, then hands back a Google favicon URL for the actual slide
+embed.
 
-Previously used logo.clearbit.com, which was discontinued (the domain no
-longer resolves at all as of 2026-08). Favicons are lower-fidelity than a
-dedicated brand-logo API and this endpoint is undocumented, but it's free,
-requires no signup, and is currently reliable."""
+History: previously used logo.clearbit.com, which was discontinued (the
+domain no longer resolves at all as of 2026-08). Switched to Google's
+favicon endpoint (www.google.com/s2/favicons), which works fine for the
+slide embed — Slides' replaceImage fetches that URL server-side from
+Google's own network, so our process's network access is irrelevant there —
+but that same endpoint 301-redirects to a sharded t0-t3.gstatic.com host
+that varies per request, so using it for our own pre-embed *validation* GET
+is unreliable in network-restricted environments (e.g. a scheduled routine
+sandbox): only the initial www.google.com hop is reachable, not the shard
+the redirect lands on, so the validation GET fails even though the eventual
+embed would have worked fine. DuckDuckGo's endpoint is a single stable host
+with no redirect, so it's used here purely to confirm a domain has a real
+favicon (it 404s rather than returning a generic fallback icon on a miss,
+unlike Google's). Its own .ico response isn't used for the embed — Slides'
+replaceImage rejects that format — only Google's PNG URL is returned."""
 
 import re
 
@@ -31,11 +44,12 @@ def find_logo_url(client_org: str) -> dict:
     candidate domain resolved to an actual logo image. Never raises —
     a miss here should not fail the whole pipeline."""
     for domain in _guess_domains(client_org):
-        url = f"https://www.google.com/s2/favicons?domain={domain}&sz=256"
+        probe_url = f"https://icons.duckduckgo.com/ip3/{domain}.ico"
         try:
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(probe_url, timeout=10)
         except requests.RequestException:
             continue
         if resp.status_code == 200 and resp.headers.get("content-type", "").startswith("image/"):
-            return {"logo_url": url, "domain": domain, "logo_bytes": resp.content}
+            embed_url = f"https://www.google.com/s2/favicons?domain={domain}&sz=256"
+            return {"logo_url": embed_url, "domain": domain, "logo_bytes": resp.content}
     return {"logo_url": None, "domain": None, "logo_bytes": None}
