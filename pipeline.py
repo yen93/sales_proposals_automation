@@ -83,9 +83,14 @@ def process_email(clients: GoogleClients, supabase, message_id: str, attachment:
         # double-check before this goes out to a real client.
         qa_notes = []
         if not logo["logo_url"]:
-            qa_notes.append("no client logo could be found automatically — add one manually if needed")
+            qa_notes.append("no client logo could be guessed automatically — add one manually if needed")
         elif not rewrite_result["logo_replaced"]:
-            qa_notes.append("client logo was found but could not be placed on the slides")
+            qa_notes.append("a guessed client logo could not be placed on the slides")
+        else:
+            qa_notes.append(
+                f"client logo was auto-guessed from domain '{logo['domain']}' — "
+                f"verify it's actually {client_org}'s logo before sending"
+            )
         if rewrite_result["overflow_risk_ids"]:
             qa_notes.append(
                 f"{len(rewrite_result['overflow_risk_ids'])} slide text box(es) may overflow their layout"
