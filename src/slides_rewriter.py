@@ -2,10 +2,13 @@
 the client logo into any image shape tagged as a logo placeholder."""
 
 import json
+import logging
 
 import anthropic
 
 import config
+
+log = logging.getLogger("slides_rewriter")
 
 MODEL = "claude-opus-5"
 LOGO_TAG_KEYWORDS = ("logo", "client_logo", "client logo")
@@ -208,29 +211,47 @@ FLAG_RATIO = 1.5
 def rewrite(slides, file_id: str, ocr_fields: dict, logo_url: str = None) -> dict:
     """Step 5 (part 2): rewrites text (shrinking font size on shapes whose new
     text runs notably longer than the original, since the Slides API has no
-    working autofit) and swaps the logo, in one batchUpdate. Returns
-    {text_shapes_updated, logo_replaced, overflow_risk_ids} for the pre-send
-    QA check in pipeline.py — overflow_risk_ids flags shapes so much longer
-    than the original that a font shrink alone may not be enough."""
+    working autofit) and swaps the logo. Returns {text_shapes_updated,
+    logo_replaced, overflow_risk_ids} for the pre-send QA check in
+    pipeline.py — overflow_risk_ids flags shapes so much longer than the
+    original that a font shrink alone may not be enough.
+
+    The text rewrite and the logo swap are deliberately sent as two separate
+    batchUpdate calls, not one. logo_url is only ever a guessed, unverified
+    domain (see logo_service.py) — the Slides API only discovers it's
+    unusable when it tries to fetch it, and batchUpdate is all-or-nothing,
+    so a bad logo URL bundled into the same call would silently roll back
+    every text rewrite too, leaving the deck duplicated but unedited. The
+    logo call is isolated and non-fatal so a bad guess only costs the logo,
+    never the text."""
     presentation = slides.presentations().get(presentationId=file_id).execute()
 
     text_shapes = extract_text_shapes(presentation)
     if text_shapes:
-        requests, rewritten_lengths = _build_rewrite_requests(text_shapes, ocr_fields)
+        text_requests, rewritten_lengths = _build_rewrite_requests(text_shapes, ocr_fields)
     else:
-        requests, rewritten_lengths = [], {}
+        text_requests, rewritten_lengths = [], {}
+
+    if text_requests:
+        slides.presentations().batchUpdate(
+            presentationId=file_id, body={"requests": text_requests}
+        ).execute()
 
     logo_replaced = False
     if logo_url:
         logo_ids = find_logo_placeholders(presentation)
         if logo_ids:
-            requests.extend(_build_logo_requests(logo_ids, logo_url))
-            logo_replaced = True
-
-    if requests:
-        slides.presentations().batchUpdate(
-            presentationId=file_id, body={"requests": requests}
-        ).execute()
+            try:
+                slides.presentations().batchUpdate(
+                    presentationId=file_id,
+                    body={"requests": _build_logo_requests(logo_ids, logo_url)},
+                ).execute()
+                logo_replaced = True
+            except Exception:
+                log.exception(
+                    "Guessed logo URL %s could not be applied to %s; leaving placeholder",
+                    logo_url, file_id,
+                )
 
     overflow_risk_ids = [
         shape["object_id"] for shape in text_shapes
