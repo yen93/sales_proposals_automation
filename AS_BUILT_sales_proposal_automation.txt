@@ -1,0 +1,366 @@
+Note: Non-secret variable values are in project_vars.txt. Secrets (API keys,
+OAuth credentials) are loaded from .env — see ENVIRONMENT & CONFIGURATION below.
+
+====================================================================
+AS-BUILT SPECIFICATION: AUTOMATED SALES PROPOSAL GENERATOR
+====================================================================
+Status: reflects the deployed pipeline as of 2026-08-06 (pipeline.py changes
+pending commit as of this writing; the routine job_config change described
+under "ROUTINE CHAINING" below is already live).
+Supersedes workflow_markdown.txt, which describes original design intent,
+not current behavior. Update this file when the pipeline changes — treat
+divergence between this file and the code as a bug in this file.
+
+
+GOAL
+----
+Automatically generate a customized sales proposal in Google Slides from
+handwritten (or typed) demo-call notes received via email, using
+pre-defined templates, and organize the output in Google Drive — with a
+persistent audit log and pre-send QA flags so nothing ships to a real
+client unchecked.
+
+
+INTEGRATION & PREREQUISITES
+----------------------------
+- Email Provider: Gmail API (OAuth2, refresh-token flow)
+- OCR / Entity Extraction: Anthropic Claude API (claude-opus-5), vision input
+- Storage: Google Drive API
+- Presentation Tool: Google Slides API
+- Dedup / Audit Log: Supabase (Postgres via supabase-py)
+- Call-Recording Enrichment (optional): Fathom API
+
+
+TECHNICAL SPECIFICATIONS & STACK REQUIREMENTS
+----------------------------------------------
+- Language: Python 3.10+ (uses PEP 604/585 type hints — list[dict], str | None)
+- Key dependencies (requirements.txt):
+  - google-api-python-client, google-auth, google-auth-oauthlib
+  - anthropic
+  - supabase
+  - python-dotenv
+  - requests
+- Model: claude-opus-5 for all three LLM calls (OCR extraction, template
+  selection, slide-text rewrite, Fathom meeting matching)
+- Entry point: main.py -> pipeline.run_once() — designed to be invoked
+  repeatedly (cron/routine); the Supabase dedup check makes reruns safe.
+- Deployment: runs both locally and as a scheduled cloud routine
+  ("sales-proposals-automation-hourly", id trig_01KNnjdscJ1KpMTEKqneqs1S,
+  hourly cron) that clones this repo fresh from `main` on every run and
+  writes a `.env` from credentials stored in the routine's own job config.
+  As of 2026-08-06 this routine is enabled=false — check before assuming
+  the hourly schedule is actually firing.
+- Sibling deployment: a separate repo/routine, "runsheet-automation-hourly"
+  (id trig_01HJxaTr2SCEG7VQR4zW286A, repo yen93/sales_runsheet_automation),
+  generates an event-day runsheet deck from this pipeline's "proposal
+  ready" notification emails. It is triggered two ways: (1) its own
+  independent hourly cron, scanning Gmail for those notification emails,
+  and (2) directly, as the very last step of THIS routine's job config —
+  see ROUTINE CHAINING below. It is a separate codebase, not part of this
+  repo; DESIGN_SPEC_google_slides_runsheet_automation.txt in this repo is
+  now stale (it predates the sibling repo's build and still says "no code
+  exists for this yet").
+
+
+DETAILED WORKFLOW ARCHITECTURE
+--------------------------------
+[ Gmail Trigger Filter ]
+        |
+        v
+[ Dedup Check: Supabase is_processed? ] --(yes)--> [ skip ]
+        |
+       (no)
+        v
+[ Step A: OCR & Entity Extraction ]
+        |
+        v
+[ Missing required fields? ] --(yes)--> [ Error notification + log, stop ]
+        |
+       (no)
+        v
+[ Step B: Send "Started" Notification Thread ]
+   (subject now carries the real client/service names, extracted in Step A)
+        |
+        v
+[ Step C: Fathom Call-Recording Match (best-effort, non-fatal) ]
+        |
+        v
+[ Step D: Template Selection ]
+        |
+        v
+[ Step E: Create/Reuse Destination Folder + Upload Original Demo Notes ]
+        |
+        v
+[ Step F: Duplicate Template ]
+        |
+        v
+[ Step G: Rewrite Slide Text (separate batchUpdate) ]
+        |
+        v
+[ Step H: Guess & Apply Client Logo (separate batchUpdate, isolated) ]
+        |
+        v
+[ Step I: Pre-Send QA Check -> success / needs_review ]
+        |
+        v
+[ Step J: Send Final Notification (reply in same thread) + Log to Supabase ]
+        |
+        v
+[ Step K: Trigger "runsheet-automation-hourly" routine (routine-level,
+  best-effort, non-fatal) — runs once per routine invocation, not once
+  per email processed in that run ]
+
+
+NOTE ON STEP ORDERING VS. ORIGINAL SPEC
+-----------------------------------------
+The original spec listed "send notification" before "OCR." In practice OCR
+(Step A) runs FIRST, and the "started" notification (Step B) is sent after,
+specifically so its subject line can carry the real client org and
+recommended service (extracted by OCR) rather than being sent blind. The
+net effect described in the original spec — an early "started" notification
+before the deck is built — is preserved; only the internal ordering changed.
+
+
+TRIGGER CRITERIA
+-----------------
+1. Gmail filter query (config.GMAIL_TRIGGER_QUERY, overridable via env):
+   has:attachment after:2026/07/19 subject:("attached image")
+2. The matching message must carry an attachment that is either an image
+   (image/*) OR a PDF (application/pdf) — e.g. a phone-scanned notes page.
+   Messages without a supported attachment are skipped, not errored.
+3. Check the Gmail message ID is NOT already logged in the Supabase table
+   proposal_demo_notes_email_logs with is_processed = true.
+
+
+EXECUTION STEPS
+-----------------
+
+Step A: Document OCR & Entity Extraction (src/ocr_service.py)
+- Download the attachment (image or PDF).
+- Send to claude-opus-5 (vision) via a forced tool call (extract_demo_notes).
+- Extracted fields: client_org, contact_name, event_date,
+  recommended_service, audience_size, location, summary, scope,
+  raw_transcript, unclear_fields (list of fields that were illegible or
+  absent — the model is instructed to flag rather than guess).
+- Required fields (config.REQUIRED_OCR_FIELDS): client_org,
+  recommended_service, summary. If any required field is missing/empty, OR
+  listed in unclear_fields, the run stops: an error reply is sent in the
+  notification thread and the message is logged to Supabase with
+  status="error" (so it will NOT be retried automatically).
+
+Step B: Send "Started" Notification Thread (src/gmail_service.py)
+- New (non-reply) Gmail thread, subject:
+  Automation: [recommended_service] for [client_org]
+- Body: "Automated proposal creation for [client_org] has been started. You
+  will be notified through this same email thread once done."
+
+Step C: Fathom Call-Recording Match (src/fathom_service.py) — best-effort
+- If FATHOM_API_KEY is configured: fetches recent Fathom recordings
+  (default lookback: FATHOM_LOOKBACK_DAYS = 30 days) and asks claude-opus-5
+  to match one to this client's demo notes (by name/contact/date
+  proximity), requiring at least "medium" confidence.
+- On a match, the full meeting JSON is added to ocr_fields as
+  "fathom_meeting_notes" and flows into the Step G rewrite prompt as extra
+  source material (pricing, special requests, instructions).
+- Any failure here (missing key, API error, no confident match) is
+  swallowed — enrichment is optional and never blocks the pipeline.
+
+Step D: Template Selection (src/template_selector.py)
+- Lists every file in the Drive folder at project_vars.txt's
+  templates_drive_link whose name contains "template" (case-insensitive) —
+  not a fixed naming prefix. As of 2026-08-05 there are 4: Uncharted Ice,
+  Uncharted Waters, Crossing the Ice Keynote, Crossing the Ditch Keynote.
+- Asks claude-opus-5 to pick the best match against the OCR'd fields, with
+  a confidence level (high/medium/low) and reasoning.
+- If confidence is "low" AND config.FALLBACK_TEMPLATE_ID is set, the
+  fallback template is used instead of the model's low-confidence pick.
+
+Step E: Folder Setup + Demo Notes Upload (src/drive_service.py)
+- Under the master folder (project_vars.txt's proj_drive_link), create (or
+  reuse, on a rerun — lookup by exact name first) a subfolder named:
+  "[client_org] [current year]"  (e.g. "Acme Corp 2026")
+- Upload the ORIGINAL demo-notes attachment into that folder as
+  "[client_org] Demo Call Notes.[ext]" — this is new versus the original
+  spec, which didn't preserve the source artifact at all.
+
+Step F: Presentation Duplication (src/drive_service.py)
+- Copy the selected template into the client folder, named:
+  "[client_org] Proposal - [recommended_service]"
+
+Step G: Slide Text Rewrite (src/slides_rewriter.py) — sent as its OWN
+batchUpdate, separate from Step H
+- This is NOT {{TOKEN}}-style find/replace. Every non-empty text shape's
+  full content is sent to claude-opus-5, which rewrites each shape to fit
+  the new client using the demo notes (+ Fathom notes if matched) as
+  source material, while:
+  - preserving each shape's structure (bullets, headers, tone/length)
+  - replacing any bracketed placeholder tokens (e.g. [CLIENT], [EVENT NAME])
+    with real values — never leaving literal brackets
+  - personalizing the cover-slide title to "[CLIENT] x [PROGRAM NAME]" when
+    the template's default title just names the generic program
+  - keeping new text within ~10-15% of the original shape's character
+    count where possible, since the Slides API has no working autofit
+    ("Autofit types other than NONE are not supported")
+  - reapplying bullet formatting after the delete/insert rewrite, since a
+    plain delete+insert otherwise silently drops it
+  - shrinking font size (down to 0.7x, proportionally) when rewritten text
+    still runs meaningfully longer than the box was sized for
+- Shapes whose rewritten text is >1.5x the original length are flagged as
+  overflow_risk_ids for Step I, even after the shrink mitigation.
+
+Step H: Client Logo (src/logo_service.py + src/slides_rewriter.py) —
+isolated in its OWN batchUpdate, deliberately separate from Step G
+- Finds image shapes tagged as a logo placeholder (title or alt-text/
+  description containing "logo", "client_logo", or "client logo" —
+  template-author-set, verifiable via inspect_template.py).
+- logo_service.find_logo_url() guesses a domain from client_org (strips
+  legal suffixes like Pty/Ltd/Inc/Group, slugifies, tries .com.au / .com /
+  .co in that priority order) and returns a Google favicon URL
+  (www.google.com/s2/favicons) for the FIRST guessed domain — UNVALIDATED.
+  No network call is made by this process itself. (See LESSONS LEARNED —
+  this was deliberately redesigned away from doing its own validation GET.)
+- That URL is handed to Slides' replaceImage, which fetches it server-side
+  on Google's own infrastructure — never through this process — so it's
+  unaffected by this process's own network reachability.
+- Sent as a SEPARATE batchUpdate from Step G's text rewrite, specifically
+  so a bad/unreachable guessed logo URL can only fail the logo step
+  (logo_replaced=False) and never rolls back the text rewrite.
+
+Step I: Pre-Send QA Check (pipeline.py) — never blocks sending
+- If no domain could be guessed at all (client_org has no usable
+  characters): "no client logo could be guessed automatically..."
+- Else if the guessed logo failed to apply (Step H's batchUpdate errored):
+  "a guessed client logo could not be placed on the slides"
+- Else (logo WAS applied): "client logo was auto-guessed from domain
+  '[domain]' — verify it's actually [client_org]'s logo before sending" —
+  this fires on every successful placement too, since the guess is never
+  confirmed against the real company.
+- Plus, if any overflow_risk_ids exist: "[N] slide text box(es) may
+  overflow their layout"
+- Any qa_notes present => Supabase status="needs_review" (else "success").
+
+Step J: Final Notification + Audit Log
+- Reply in the SAME Gmail thread from Step B:
+  "The proposal for [client_org] is ready: [Slides edit link]"
+  — with an "FYI" block appended when a Fathom recording and/or a client
+  logo match was found (see MATCH NOTES below), followed by QA notes
+  appended as a "please double-check before sharing externally" block
+  when present.
+- Upsert to Supabase table proposal_demo_notes_email_logs (on_conflict =
+  message_id): is_processed=true, status (success/needs_review/error),
+  error_message, proposal_link, processed_at. This is a full audit log,
+  not just a dedup flag — every outcome is recorded, including errors.
+
+MATCH NOTES (pipeline.py's match_notes list, added 2026-08-06)
+- Purely informational — separate from qa_notes and never affects the
+  success/needs_review status. Appended to the final email as an "FYI —"
+  line, ahead of any QA block, whenever a match was actually found:
+  - Fathom: if Step C found a matching call recording, "a matching Fathom
+    call recording was found and its notes were used as source material
+    for this proposal."
+  - Logo: if Step H both guessed a domain AND successfully applied the
+    logo (rewrite_result["logo_replaced"] is True), "a client logo match
+    was found (guessed from domain '[domain]') and applied to the deck."
+    Note this overlaps with the existing qa_notes entry for the same
+    successful-placement case (which additionally asks the recipient to
+    verify the guess) — both can appear in the same email, in different
+    blocks, for the same event.
+- If no Fathom match and/or no logo match, nothing is added here (silent,
+  not "no match found" — the qa_notes block already covers the no-logo-
+  guessed and guess-failed cases explicitly).
+
+Step K: Trigger Sibling Runsheet Routine (routine job_config, NOT in
+pipeline.py — no code in this repo implements this)
+- Added 2026-08-06 directly to the sales-proposals-automation-hourly
+  routine's stored job_config prompt (trig_01KNnjdscJ1KpMTEKqneqs1S), not
+  to any file in this repo — there is nothing to grep for in the codebase.
+- As the last instruction in that prompt, after `python main.py` finishes
+  without a fatal/unhandled error (zero emails processed counts as
+  success, not failure), the routine's own agent calls the RemoteTrigger
+  tool with action="run", trigger_id="trig_01HJxaTr2SCEG7VQR4zW286A" (the
+  runsheet-automation-hourly routine), so the runsheet pipeline runs
+  immediately rather than waiting for its own independent hourly cron.
+- This is a single trigger per ROUTINE run, not per email/proposal
+  processed within that run — main.py's run_once() loops over all matching
+  emails in one process invocation, and the RemoteTrigger call happens
+  once after that whole loop completes.
+- Safe to call unconditionally: the runsheet routine re-scans Gmail for
+  "proposal ready" notification emails and has its own Supabase dedup, so
+  triggering it when there's nothing new for it to do is a harmless no-op.
+- A failure of this RemoteTrigger call is explicitly non-fatal to this
+  routine — it's reported in the run's final summary but doesn't change
+  this routine's own success/failure outcome.
+- Runs regardless of the runsheet routine's own enabled/disabled state
+  and independently of its own cron schedule — RemoteTrigger{action:"run"}
+  fires it directly.
+
+Error path (any unhandled exception, at any step):
+- Reply in the notification thread: "Automation hit an unexpected error
+  and could not finish this proposal: [exception]"
+- Supabase status="error", is_processed=true (NOT retried automatically —
+  a human must intervene and, if needed, manually rerun against the
+  duplicated file or clear is_processed to allow a retry).
+
+
+ENVIRONMENT & CONFIGURATION
+------------------------------
+.env (secrets — never committed):
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
+  ANTHROPIC_API_KEY
+  SUPABASE_URL, SUPABASE_SERVICE_KEY
+  FATHOM_API_KEY                  (optional — enrichment skipped if unset)
+  GMAIL_TRIGGER_QUERY             (optional override)
+  FALLBACK_TEMPLATE_ID            (optional)
+  FATHOM_LOOKBACK_DAYS            (optional, default 30)
+
+project_vars.txt (non-secret, JSON array with one object):
+  demo_notes_recipients, notification_recipients,
+  proj_drive_link, templates_drive_link
+
+Note: the original spec named the Google token env var "GMAIL_TOKEN" — the
+actual variable is GOOGLE_REFRESH_TOKEN (OAuth2 refresh-token flow via
+oauth_setup.py), and Supabase/Fathom vars weren't in the original list at
+all despite the pipeline hard-depending on Supabase.
+
+
+OPERATIONAL LESSONS LEARNED (worth reading before touching logo_service.py
+or adding any new third-party integration)
+-----------------------------------------------------------------------------
+1. The scheduled cloud routine runs in a network-restricted sandbox. Any
+   outbound call this process makes itself to a host beyond Gmail/Drive/
+   Slides/Anthropic's default-allowlisted domains needs that host added to
+   the environment's Network Access allowlist — Supabase and Fathom both
+   needed this. This fails SILENTLY where code catches the exception
+   (e.g. logo lookup, Fathom) rather than raising.
+2. Google's favicon endpoint (www.google.com/s2/favicons) 301-redirects to
+   a sharded, per-request t0-t3.gstatic.com host — impossible to allowlist
+   reliably. Swapping the validation call to a different single-host
+   service (DuckDuckGo) just moved the problem to a NEW unlisted host.
+3. The actual fix: logo_service.py makes NO outbound call of its own at
+   all anymore. General principle for future integrations — if a value
+   only needs to end up as a URL string handed to a Google API (Slides,
+   Drive, etc.), prefer passing it through unvalidated over doing a
+   pre-fetch from this process: the Google API's own server-side fetch is
+   exempt from this sandbox's network policy, but this process's own fetch
+   never is.
+4. Consequence of #3: an unvalidated URL can still fail server-side (e.g.
+   Google's favicon endpoint returning a genuine 404 for some guessed
+   domains, not just a graceful fallback icon) — this is why Step H is
+   isolated into its own batchUpdate. Never bundle an unverified/best-guess
+   API call into the same atomic batchUpdate as confirmed-good operations
+   (like the text rewrite) — a Slides batchUpdate is all-or-nothing.
+
+
+EXPECTED OUTPUT
+-----------------
+1. Google Drive: "[client_org] [year]" folder containing:
+   - "[client_org] Demo Call Notes.[ext]" (the original attachment)
+   - "[client_org] Proposal - [recommended_service]" (the generated deck)
+2. Gmail: one thread per processed email, "started" + "ready"
+   (or error) messages — the "ready" message includes an "FYI" block
+   noting any Fathom/logo matches found, ahead of any QA block.
+3. Supabase (proposal_demo_notes_email_logs): one row per processed
+   message, permanent audit trail of status/outcome/link.
+4. Sibling routine "runsheet-automation-hourly" triggered directly once
+   per proposal-routine run (Step K) — see its own repo/as-built (if any
+   exists yet — none is checked into THIS repo) for what it produces.

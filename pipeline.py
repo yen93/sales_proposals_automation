@@ -79,6 +79,14 @@ def process_email(clients: GoogleClients, supabase, message_id: str, attachment:
             slides, duplicate["file_id"], ocr_fields, logo_url=logo["logo_url"]
         )
 
+        # Match notes: purely informational, always shown when a match was found —
+        # distinct from qa_notes below, which flags things a human should verify.
+        match_notes = []
+        if fathom_notes:
+            match_notes.append("a matching Fathom call recording was found and its notes were used as source material for this proposal")
+        if logo["logo_url"] and rewrite_result["logo_replaced"]:
+            match_notes.append(f"a client logo match was found (guessed from domain '{logo['domain']}') and applied to the deck")
+
         # Pre-send QA: never blocks sending, just flags what a human should
         # double-check before this goes out to a real client.
         qa_notes = []
@@ -97,6 +105,8 @@ def process_email(clients: GoogleClients, supabase, message_id: str, attachment:
             )
 
         ready_message = f"The proposal for {client_org} is ready: {duplicate['view_url']}"
+        if match_notes:
+            ready_message += "\n\nFYI — " + "; ".join(match_notes) + "."
         if qa_notes:
             ready_message += (
                 "\n\nNote: please double-check this deck before sharing externally — "
