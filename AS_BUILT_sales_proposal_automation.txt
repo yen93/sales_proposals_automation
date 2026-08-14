@@ -364,3 +364,31 @@ EXPECTED OUTPUT
 4. Sibling routine "runsheet-automation-hourly" triggered directly once
    per proposal-routine run (Step K) — see its own repo/as-built (if any
    exists yet — none is checked into THIS repo) for what it produces.
+
+
+RUNNING THIS LOCALLY / AS A TEAM
+-----------------------------------
+This runs both as the scheduled cloud routine (see DEPLOYMENT above) and
+on demand, locally, via the Claude Code project skill at
+.claude/skills/run-proposal-pipeline/SKILL.md, which just runs
+`python main.py` — the identical pipeline.run_once() code path.
+
+For a teammate to run it:
+1. Clone/pull this repo. `.claude/skills/` is tracked in git (everything
+   else under .claude/ — e.g. settings.local.json — is still gitignored),
+   so the skill comes along automatically; Claude Code auto-discovers any
+   project skill under .claude/skills/ with no separate registration step.
+2. `pip install -r requirements.txt`.
+3. Get the shared .env from
+   https://drive.google.com/drive/folders/13DKRuTp95VWeDLIBPOYefiLQepYCVKbG
+   and place it in the project root. Never commit it — it's the same
+   credential set the cloud routine uses (Google refresh token tied to
+   julienne@myadventuregroup.com.au, plus Anthropic/Supabase/Fathom keys).
+4. In Claude Code, run `/run-proposal-pipeline` (or just ask it to run the
+   proposal pipeline).
+
+Shared-identity caveat: everyone runs as the same Gmail/Drive/Slides
+identity. Two teammates running it back-to-back is fine — Supabase dedup
+prevents double-processing the same email — but they aren't isolated from
+each other; one teammate rotating the shared credentials or editing .env
+affects everyone's next run.

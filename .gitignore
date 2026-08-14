@@ -3,4 +3,5 @@
 claudegwscli-client_secret_*.json
 __pycache__/
 *.pyc
-.claude/
+.claude/*
+!.claude/skills/
