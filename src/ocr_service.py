@@ -1,13 +1,9 @@
-"""OCR + entity extraction from the handwritten demo-notes photo via Claude vision."""
+"""OCR + entity extraction from the handwritten demo-notes photo via OpenAI vision."""
 
 import base64
-from typing import Optional
-
-import anthropic
 
 import config
-
-MODEL = "claude-opus-5"
+from src import llm_client
 
 EXTRACTION_TOOL = {
     "name": "extract_demo_notes",
@@ -48,41 +44,28 @@ EXTRACTION_TOOL = {
 
 
 def extract_fields(image_bytes: bytes, mime_type: str) -> dict:
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     encoded = base64.standard_b64encode(image_bytes).decode("utf-8")
-    block_type = "document" if mime_type == "application/pdf" else "image"
+    data_url = f"data:{mime_type};base64,{encoded}"
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        tools=[EXTRACTION_TOOL],
-        tool_choice={"type": "tool", "name": "extract_demo_notes"},
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": block_type,
-                        "source": {"type": "base64", "media_type": mime_type, "data": encoded},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Transcribe this handwritten sales demo-call notes page and extract "
-                            "the fields defined in extract_demo_notes. If handwriting is illegible "
-                            "or a field isn't on the page, leave it as an empty string and list its "
-                            "name in unclear_fields rather than guessing."
-                        ),
-                    },
-                ],
-            }
-        ],
-    )
+    if mime_type == "application/pdf":
+        source_block = {"type": "input_file", "filename": "demo_notes.pdf", "file_data": data_url}
+    else:
+        source_block = {"type": "input_image", "image_url": data_url}
 
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "extract_demo_notes":
-            return block.input
-    raise RuntimeError("Claude did not return the expected extract_demo_notes tool call")
+    content = [
+        source_block,
+        {
+            "type": "input_text",
+            "text": (
+                "Transcribe this handwritten sales demo-call notes page and extract "
+                "the fields defined in extract_demo_notes. If handwriting is illegible "
+                "or a field isn't on the page, leave it as an empty string and list its "
+                "name in unclear_fields rather than guessing."
+            ),
+        },
+    ]
+
+    return llm_client.call_tool(content, EXTRACTION_TOOL)
 
 
 def missing_required_fields(fields: dict) -> list[str]:

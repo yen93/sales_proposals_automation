@@ -1,0 +1,143 @@
+================================================================================
+CHAT HISTORY EXPORT — 2026-09-08
+Session: Diagnosed a blocked proposal (illegible client name), made client_org
+non-blocking, then migrated the pipeline's LLM provider from Claude to OpenAI
+(after the Anthropic org ran out of credits) and switched to a cheaper model
+================================================================================
+
+NOTE ON REDACTIONS: This session involved reading .env directly (which
+contains live credentials) and the user pasting a live OpenAI API key into
+the wrong file. All actual secret values below have been replaced with
+[REDACTED_*] placeholders — none are reproduced here.
+
+--------------------------------------------------------------------------------
+USER:
+Reported that the last automation run failed with "Could not process this
+proposal request — unclear/missing: client_org," referencing the demo-notes
+PDF "1114_001 - Liv Junne Badon.pdf" and a claude.ai session link.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Read pipeline.py, src/ocr_service.py, config.py, and the PDF itself. Found the
+PDF's handwritten "CLIENT" field was a genuine illegible scrawl, but
+cross-referenced against the "40 Gallagher" note under audience size —
+concluded the client is almost certainly "Gallagher" (contact Jacqui Marsham).
+Confirmed this wasn't a bug: OCR correctly flagged client_org as unclear,
+missing_required_fields() caught it, and the pipeline stopped by design.
+Also noted that supabase_service.mark_processed() marks is_processed=True even
+on error, so the email would never be retried automatically.
+
+Asked the user how to handle this specific case (manually generate the
+proposal now / reset the Supabase error record / just wanted the explanation).
+User answered: keep it as a routine-level change instead — if the client can't
+be identified in future runs, proceed anyway and just add a note in the email
+notification rather than blocking.
+
+Implemented that: removed "client_org" from config.REQUIRED_OCR_FIELDS
+(pipeline.py already had an "Unknown Client" fallback), and added a qa_note in
+pipeline.py's _process_demo_notes when client_org is missing/unclear, so the
+run now completes with status="needs_review" instead of erroring out. Updated
+AS_BUILT_sales_proposal_automation.txt to document the new behavior. Verified
+config.REQUIRED_OCR_FIELDS loads correctly after the change.
+
+--------------------------------------------------------------------------------
+USER:
+Confirmed the fix worked, but then hit a new problem: "Your Claude API access
+is turned off... out of usage credits" on the Anthropic org ("Yen's
+Individual Org"). Asked whether an OpenAI API key could be used instead, to
+avoid paying for a separate Claude API key.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Entered plan mode (system-directed). Ran an Explore agent to find every Claude
+API usage site in the repo: src/ocr_service.py (vision+PDF, forced tool call),
+src/template_selector.py, src/fathom_service.py, src/slides_rewriter.py — all
+text-only except OCR, all following an identical
+client.messages.create(...)+tool_choice+parse-loop pattern.
+
+Researched OpenAI's current API (WebSearch/WebFetch against
+developers.openai.com docs) to confirm feature parity: the Responses API
+supports base64 PDF input (input_file blocks), vision (input_image), and
+forced single-function tool calls with strict JSON-schema output — confirmed
+this was a like-for-like swap, not a redesign. Also confirmed the current
+OpenAI model lineup (gpt-6-astra flagship down to gpt-5.6-luna cheapest).
+
+Asked the user two clarifying questions: swap all 4 sites or just OCR (chose
+all 4), and which model tier for OCR given its known handwriting-accuracy
+sensitivity (chose top-tier, gpt-6-astra, at the time).
+
+Wrote and got approval for a plan: replace anthropic with openai in
+requirements.txt; replace ANTHROPIC_API_KEY with OPENAI_API_KEY +
+OPENAI_MODEL in config.py; add a new shared src/llm_client.py helper
+(get_client, a strict-mode JSON-schema converter, and call_tool()) so the 4
+call sites keep their existing Anthropic-shaped TOOL dicts and only swap their
+content-block construction and the call itself; update .env.example and the
+as-built doc.
+
+Implemented all of it: created src/llm_client.py, edited all 4 service files
+(removed `import anthropic`/MODEL constants, added `from src import
+llm_client`, rebuilt content blocks as input_text/input_image/input_file),
+updated config.py, requirements.txt, .env.example, and
+AS_BUILT_sales_proposal_automation.txt (including a flagged note that
+api.openai.com's status in the cloud routine's network sandbox allowlist is
+unverified). Installed the openai package and ran python -c import checks.
+
+Smoke-tested end to end: OCR against the real Gallagher PDF (worked; found and
+fixed a real bug along the way — config.py's `os.environ.get("OPENAI_MODEL",
+"gpt-6-astra")` returned "" instead of the default because .env had
+OPENAI_MODEL= blank rather than unset; fixed to `os.environ.get(...) or
+"gpt-6-astra"`), then read-only tests of template_selector and fathom_service
+(both worked). Asked the user whether to also run the full live pipeline to
+exercise the one remaining untested write path (slide-text rewrite +
+batchUpdate); user agreed but asked that notification emails for this test go
+only to themself.
+
+Ran pipeline._process_demo_notes() directly (in-process override of
+config.NOTIFICATION_RECIPIENTS to the user's email only; a distinct test
+dedup_key so the real historical Gallagher Supabase row wasn't touched). Full
+run succeeded: OCR, template selection, Fathom match, folder creation, slide
+rewrite via batchUpdate, and a graceful (caught, logged, non-fatal) logo-swap
+failure — exactly the intended behavior given the client name still
+couldn't be identified. Asked whether to clean up the test Drive
+folder/deck and Supabase row; user said yes — trashed the "Unknown Client
+2026" Drive folder and deleted the Supabase test row.
+
+Along the way, the user pasted a live OpenAI key into .env.example (which is
+tracked in git, unlike the gitignored .env) — caught this before it could be
+committed, moved the key into .env, and restored .env.example to a blank
+placeholder.
+
+Finished the remaining doc updates: bulk-replaced "claude-opus-5"/Anthropic
+references with OpenAI/gpt-6-astra across AS_BUILT_sales_proposal_automation.txt
+(integration list, model line, per-step descriptions, env var list, sandbox
+allowlist note, shared-.env credential note). Deliberately did NOT edit
+workflow_markdown.txt, since that file is the original historical spec
+document (its own conventions say deviations get recorded in the as-built doc,
+not retrofitted into the original spec) — flagged this reasoning to the user
+rather than silently skipping it.
+
+--------------------------------------------------------------------------------
+USER:
+Asked to switch to a cheaper OpenAI model across all 4 call sites — the
+current flagship model was too expensive.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Looked up the current OpenAI model tier pricing (WebFetch): gpt-6-astra
+($10/$50 per million input/output tokens), gpt-5.6-sol ($4/$20), gpt-5.6-terra
+($2/$12, OpenAI's own recommended balance for cost-sensitive OCR), gpt-5.6-luna
+($0.20/$1.20, cheapest vision-capable tier). Asked the user to pick a tier
+given the known OCR-accuracy risk at the cheap end; user chose gpt-5.6-luna
+(the cheapest).
+
+Updated config.py's default model to gpt-5.6-luna, updated the .env.example
+comment and all remaining gpt-6-astra references in
+AS_BUILT_sales_proposal_automation.txt to match. Re-ran the OCR smoke test
+against the Gallagher PDF to confirm the model name is valid and extraction
+still works — it did. Flagged that gpt-5.6-luna is the cheapest tier and
+handwriting-OCR quality is worth watching; suggested gpt-5.6-terra as a
+middle-ground fallback if needs_review flags increase.
+
+================================================================================
+END OF EXPORT
+================================================================================

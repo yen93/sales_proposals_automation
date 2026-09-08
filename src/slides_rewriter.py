@@ -1,16 +1,13 @@
-"""Rewrites a duplicated deck's client-specific text via Claude, and swaps
+"""Rewrites a duplicated deck's client-specific text via an LLM, and swaps
 the client logo into any image shape tagged as a logo placeholder."""
 
 import json
 import logging
 
-import anthropic
-
-import config
+from src import llm_client
 
 log = logging.getLogger("slides_rewriter")
 
-MODEL = "claude-opus-5"
 LOGO_TAG_KEYWORDS = ("logo", "client_logo", "client logo")
 
 REWRITE_TOOL = {
@@ -100,48 +97,35 @@ def find_logo_placeholders(presentation: dict) -> list[str]:
 
 
 def _build_rewrite_requests(shapes: list[dict], ocr_fields: dict) -> list[dict]:
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=8192,
-        tools=[REWRITE_TOOL],
-        tool_choice={"type": "tool", "name": "rewrite_slide_text"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "This is a sales proposal template originally written for a "
-                    "different client. Rewrite each shape's text below so it fits "
-                    "the new client, using the demo-call notes as source material. "
-                    "Preserve each shape's structure (bullet points, headers, "
-                    "length/tone) — only change client-specific content (names, "
-                    "org details, dates, references to the old client's situation). "
-                    "Leave shapes that aren't client-specific (e.g. generic section "
-                    "titles, footer boilerplate) unchanged — still return them. "
-                    "Any shape containing bracketed placeholder tokens (e.g. [CLIENT], "
-                    "[CLIENT_NAME], [EVENT NAME]) must have every token replaced with "
-                    "the real value — never leave literal brackets in the output. "
-                    "The cover slide's title (the first slide's main heading, if it "
-                    "names the generic program/keynote rather than the client — e.g. "
-                    "\"CROSSING THE DITCH\") should be personalized to name both the "
-                    "client and the program, e.g. \"{CLIENT} x {PROGRAM NAME}\". "
-                    "Each shape's box is sized for its original text — keep new_text's "
-                    "character count close to the original 'text' length for that same "
-                    "shape (roughly within 10-15%) so it doesn't overflow the box; "
-                    "shorten or trim detail rather than exceeding that.\n\n"
-                    f"Demo notes:\n{json.dumps(ocr_fields, indent=2)}\n\n"
-                    f"Template shapes:\n{json.dumps(shapes, indent=2)}"
-                ),
-            }
-        ],
-    )
-
-    rewritten = None
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "rewrite_slide_text":
-            rewritten = block.input["shapes"]
-    if rewritten is None:
-        raise RuntimeError("Claude did not return the expected rewrite_slide_text tool call")
+    content = [
+        {
+            "type": "input_text",
+            "text": (
+                "This is a sales proposal template originally written for a "
+                "different client. Rewrite each shape's text below so it fits "
+                "the new client, using the demo-call notes as source material. "
+                "Preserve each shape's structure (bullet points, headers, "
+                "length/tone) — only change client-specific content (names, "
+                "org details, dates, references to the old client's situation). "
+                "Leave shapes that aren't client-specific (e.g. generic section "
+                "titles, footer boilerplate) unchanged — still return them. "
+                "Any shape containing bracketed placeholder tokens (e.g. [CLIENT], "
+                "[CLIENT_NAME], [EVENT NAME]) must have every token replaced with "
+                "the real value — never leave literal brackets in the output. "
+                "The cover slide's title (the first slide's main heading, if it "
+                "names the generic program/keynote rather than the client — e.g. "
+                "\"CROSSING THE DITCH\") should be personalized to name both the "
+                "client and the program, e.g. \"{CLIENT} x {PROGRAM NAME}\". "
+                "Each shape's box is sized for its original text — keep new_text's "
+                "character count close to the original 'text' length for that same "
+                "shape (roughly within 10-15%) so it doesn't overflow the box; "
+                "shorten or trim detail rather than exceeding that.\n\n"
+                f"Demo notes:\n{json.dumps(ocr_fields, indent=2)}\n\n"
+                f"Template shapes:\n{json.dumps(shapes, indent=2)}"
+            ),
+        }
+    ]
+    rewritten = llm_client.call_tool(content, REWRITE_TOOL)["shapes"]
 
     shapes_by_id = {s["object_id"]: s for s in shapes}
     requests = []

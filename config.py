@@ -35,11 +35,19 @@ NOTIFICATION_RECIPIENTS = _PROJECT_VARS["notification_recipients"]
 PROJ_DRIVE_FOLDER_ID = _folder_id_from_link(_PROJECT_VARS["proj_drive_link"])
 TEMPLATES_DRIVE_FOLDER_ID = _folder_id_from_link(_PROJECT_VARS["templates_drive_link"])
 
+# Optional: the Google Form intake path (src/form_intake_service.py) is skipped
+# entirely (run_once() treats it as not configured) until these are filled in
+# after the "Demo Call Notes Intake" form is created.
+INTAKE_FORM_ID = _PROJECT_VARS.get("intake_form_id") or ""
+_form_uploads_link = _PROJECT_VARS.get("form_uploads_drive_link") or ""
+FORM_UPLOADS_FOLDER_ID = _folder_id_from_link(_form_uploads_link) if _form_uploads_link else ""
+
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
 
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL") or "gpt-5.6-luna"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
@@ -54,16 +62,17 @@ FATHOM_API_KEY = os.environ.get("FATHOM_API_KEY", "")
 FATHOM_LOOKBACK_DAYS = int(os.environ.get("FATHOM_LOOKBACK_DAYS", "30"))
 
 SUPABASE_LOG_TABLE = "proposal_demo_notes_email_logs"
+SUPABASE_FORM_LOG_TABLE = "form_demo_notes_intake_logs"
 
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/presentations",
+    "https://www.googleapis.com/auth/forms.responses.readonly",
 ]
 
 REQUIRED_OCR_FIELDS = [
-    "client_org",
     "recommended_service",
     "summary",
 ]

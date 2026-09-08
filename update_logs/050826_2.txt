@@ -1,0 +1,10 @@
+Pushed (0e42a07). Summary of this round:
+
+The regression: last fix (removing network validation) had a side effect — Google's favicon endpoint doesn't always fail gracefully; for "Eagle Hawk Secondary College" it returned a flat 404, and since the logo replaceImage request was bundled into the same atomic batchUpdate as all the text rewrites, that one bad guess rolled back everything — the duplicated deck was left with literal [CLIENT]/[EVENT NAME] placeholder text, and the pipeline marked it status=error with no proposal_link, so it would never surface for review or get retried.
+
+Fix: slides_rewriter.rewrite() now sends the text rewrite and the logo swap as two separate batchUpdate nly costslogo_replaced=False — already handled gracefully by pipeline.py's existing QA note — and never touches the text.                                            
+Cleanup done:
+- Repaired the actual broken deck (1KvjbZe0WVsNU2yff0cq...) by re-running the fixed logic against it diy filled in ("Eagle HawkSecondary College x Uncharted Ice"), logo left as template default with the   expected QA flag.
+- Updated its Supabase row from error/no-link to needs_review with the real proposal link, since it was otherwise going to stay invisible.
+
+One loose end: there's an untracked, garbled file update_logs/050826_1.txt sitting in the repo that I didn't create — looks like a corrupted paste of an earlier reply of mine. I now its origin, but youmay want to clean it up.

@@ -1,0 +1,7 @@
+All three changes are in place:
+
+1. Routine chaining — Updated the live sales-proposals-automation-hourly job config (trig_01KNnjdscJ1K python main.py finisheswithout a fatal error, it now calls RemoteTrigger{action:"run", trigger_id:"trig_01HJxaTr2SCEG7VQR4zW286A"} as its very last step, firing the sibling runsheet-automation-hourly routine immediately instead of waiting for its own independent cron.nge, not a code change —nothing in this repo implements it. The routine remains enabled: false, unchanged.
+2. Final email match notes — pipeline.py now builds a match_notes list, added as an "FYI —" block ahead of the QA block whenever a match was actually found: a Fathom recording match, and/or a successfully-applied logo match. This is purely additive and doesn't change the existing needs_review/success status logic.
+3. AS_BUILT doc — Updated to document the new Step K (routine-level trigger, with its own section explaining it's config-only, best-effort, fires once per routine run not per emailor in Step J, the siblingrepo/routine's existence, and flagged that DESIGN_SPEC_google_slidesow stale since therunsheet automation was actually already built in a separate repo.
+yes	
+Note: pipeline.py and the AS_BUILT file are uncommitted locally — let me know if you'd like me to commit and push so the routine's next git clone of main actually picks up the match-notes change.

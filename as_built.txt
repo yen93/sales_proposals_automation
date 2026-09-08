@@ -1,0 +1,147 @@
+================================================================================
+AS-BUILT — Uncharted Ice Proposal Maker (sales proposal automation)
+Last updated: 2026-09-08
+================================================================================
+
+SCRIPTS
+- main.py — entrypoint, runs pipeline.run_once() once. Meant to be invoked
+  repeatedly (cron/routine); Supabase dedup makes reruns safe.
+  Requires: .env (see ENVIRONMENT below), project_vars.txt.
+- pipeline.py — orchestrates the full 6-step (A-K) proposal generation flow
+  for every unprocessed matching Gmail email and Google Form response found
+  on a single run. Shared core (_process_demo_notes) is used by both trigger
+  sources.
+- oauth_setup.py — one-time interactive script to mint GOOGLE_REFRESH_TOKEN
+  via the OAuth consent flow. Re-run whenever GOOGLE_SCOPES changes.
+- inspect_template.py — debug tool: dumps a Slides presentation's
+  text/image element metadata (object IDs, titles, descriptions) so you can
+  identify a template's logo-placeholder shape before wiring it up.
+  Usage: `python inspect_template.py <presentation_id_or_url>`
+
+SRC/ MODULES
+- src/google_clients.py — builds authenticated Gmail/Drive/Slides/Forms
+  clients from the stored OAuth refresh token.
+- src/gmail_service.py — finds matching demo-notes emails (config.GMAIL_TRIGGER_QUERY),
+  pulls the image/PDF attachment, sends the "started"/"ready"/error
+  notification emails (all to config.NOTIFICATION_RECIPIENTS, from
+  project_vars.txt).
+- src/form_intake_service.py — alternate trigger via the "Demo Call Notes
+  Intake" Google Form (Forms API). Requires items with exact titles ("Client
+  org", "Contact name", "Event date", "Proposal Type", "Demo call notes")
+  on the form. Text answers prefill/override the OCR guess for that field.
+  Gated: only "uncharted ice" proposal_type responses are auto-processed
+  (pipeline.FORM_ALLOWED_PROPOSAL_TYPE), pending validation of this trigger
+  path before opening it to other proposal types.
+- src/ocr_service.py — OCR + structured field extraction from the
+  handwritten/typed demo-notes photo or PDF, via OpenAI (see LLM section
+  below). Required fields: recommended_service, summary (config.REQUIRED_OCR_FIELDS).
+  client_org is NOT required — if missing/unclear, the pipeline proceeds
+  under the placeholder "Unknown Client" and flags it as a qa_note instead
+  of blocking (this changed 2026-09-08; previously client_org being
+  unclear/illegible handwriting would hard-block the whole run).
+- src/fathom_service.py — best-effort enrichment: matches a recent Fathom
+  call recording to the OCR'd demo notes (name/contact/date proximity, via
+  OpenAI). Returns None (never blocks the pipeline) if FATHOM_API_KEY is
+  unset, the API call fails, or no confident match is found.
+- src/template_selector.py — lists Drive files in the templates folder whose
+  name contains "template" (case-insensitive), asks OpenAI to pick the best
+  match for the client, with a confidence level. Falls back to
+  config.FALLBACK_TEMPLATE_ID on a "low" confidence pick, if set.
+- src/drive_service.py — creates/reuses the "[client] [year]" Drive folder,
+  uploads the original demo-notes attachment into it, duplicates the chosen
+  template.
+- src/slides_rewriter.py — rewrites every non-empty text shape in the
+  duplicated deck via OpenAI (preserving structure/bullets, replacing
+  bracketed placeholder tokens, shrinking font size if rewritten text runs
+  notably longer than the original — the Slides API has no working
+  autofit), then separately (isolated batchUpdate, non-fatal on failure)
+  swaps in a guessed client logo on any image shape tagged as a logo
+  placeholder.
+- src/logo_service.py — guesses a client logo URL (Google favicon endpoint)
+  from the client org name, with NO outbound network call of its own (the
+  URL is only ever fetched server-side by Slides' replaceImage) — this
+  guessed-domain approach is a deliberate simplification after two earlier
+  approaches (Clearbit, then a self-validated favicon lookup) broke in the
+  cloud routine's network-restricted sandbox. Always an unverified guess;
+  callers must surface it for human review.
+- src/llm_client.py — shared OpenAI Responses API helper used by all 4 LLM
+  call sites above (ocr_service, fathom_service, template_selector,
+  slides_rewriter). Forces a single named-function tool call with strict
+  JSON-schema output; each call site's TOOL dict stays in its original
+  Anthropic shape ({name, description, input_schema}) and this module
+  converts it to OpenAI's function-tool shape internally. Added 2026-09-08
+  when the pipeline was migrated off the Claude API.
+- src/supabase_service.py — dedup/audit log against two Supabase tables (see
+  DATA STORES). mark_processed()/mark_response_processed() always set
+  is_processed=True regardless of outcome, so a failed/errored request is
+  never retried automatically — a stuck request needs manual intervention
+  (reset the Supabase row, or reprocess out-of-band).
+
+LLM PROVIDER
+- OpenAI API (migrated from Anthropic/Claude on 2026-09-08, after the
+  Anthropic org ran out of usage credits). Model: config.OPENAI_MODEL
+  (env-overridable), currently defaulting to gpt-5.6-luna — the cheapest
+  vision-capable OpenAI tier ($0.20/$1.20 per million input/output tokens),
+  chosen for cost over the flagship gpt-6-astra. Used for all 4 structured-
+  extraction/rewrite calls listed above. Worth watching: this is the
+  cheapest tier, so handwriting-OCR accuracy (client_org in particular) may
+  be more prone to "unclear" flags than the flagship model was — gpt-5.6-terra
+  ($2/$12) is the documented middle ground if needs_review rates climb.
+
+EXTERNAL INTEGRATIONS
+- Gmail API (OAuth2, refresh-token flow) — email trigger, attachment
+  download, notification sending. Credential: GOOGLE_REFRESH_TOKEN in .env.
+- Google Drive API — folder/file management. Same credential.
+- Google Slides API — presentation duplication and batchUpdate rewrites.
+  Same credential.
+- Google Forms API (forms.responses.readonly scope) — alternate trigger.
+  Same credential (refresh token must include this scope; re-run
+  oauth_setup.py if it was minted before this scope was added).
+- OpenAI API (platform.openai.com) — OCR/vision, template selection, Fathom
+  matching, slide rewrite. Credential: OPENAI_API_KEY in .env.
+- Supabase (Postgres via supabase-py) — dedup/audit log. Credential:
+  SUPABASE_URL + SUPABASE_SERVICE_KEY in .env.
+- Fathom (developers.fathom.ai) — optional call-recording enrichment.
+  Credential: FATHOM_API_KEY in .env (pipeline proceeds without enrichment
+  if unset).
+
+DATA STORES
+- Supabase table proposal_demo_notes_email_logs — Gmail-sourced dedup/audit:
+  message_id, is_processed, status (success|error|needs_review),
+  error_message, proposal_link, processed_at.
+- Supabase table form_demo_notes_intake_logs — identical shape, keyed by
+  Google Forms response_id instead of message_id.
+- project_vars.txt (repo root, non-secret, tracked in git) — JSON array with
+  one object: demo_notes_recipients, notification_recipients,
+  proj_drive_link, templates_drive_link, intake_form_id (optional — empty
+  disables the Form trigger path), form_uploads_drive_link (informational
+  only).
+- Google Drive — "[client_org] [year]" folders under proj_drive_link, each
+  holding the original demo-notes attachment and the generated proposal
+  deck.
+
+AUTOMATIONS / ROUTINES
+- "sales-proposals-automation-hourly" (cloud routine, id
+  trig_01KNnjdscJ1KpMTEKqneqs1S) — hourly cron, clones this repo fresh from
+  `main` and writes its own .env from credentials in the routine's job
+  config. As of 2026-08-06 this routine was enabled=false — check before
+  assuming the hourly schedule is actually firing. Its network sandbox is
+  restricted; api.openai.com's allowlist status there is UNVERIFIED as of
+  the 2026-09-08 OpenAI migration (api.anthropic.com may have been
+  default-allowlisted where api.openai.com is not) — confirm before relying
+  on the hourly schedule post-migration.
+- As the last step of that routine's job config, it triggers a separate
+  sibling routine/repo, "runsheet-automation-hourly" (id
+  trig_01HJxaTr2SCEG7VQR4zW286A, repo yen93/sales_runsheet_automation), which
+  generates an event-day runsheet deck from this pipeline's "proposal ready"
+  notification emails. Not part of this repo.
+- Local/manual runs: `python main.py`, or the `.claude/skills/run-proposal-pipeline`
+  project skill (tracked in git) which runs the identical code path.
+
+OTHER
+- The shared team .env (Google Drive link in the setup instructions) still
+  needs its ANTHROPIC_API_KEY replaced with OPENAI_API_KEY for other
+  teammates/the cloud routine's job config — this repo's own local .env/.env.example
+  were updated 2026-09-08, but the shared copy was not (out of scope for a
+  local code change).
+================================================================================

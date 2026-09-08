@@ -1,0 +1,278 @@
+Note: Non-secret variable values would live in project_vars.txt, alongside
+the existing sales-proposal automation's entries — see PROPOSED CONFIG below.
+
+====================================================================
+DESIGN SPECIFICATION (NOT YET BUILT): AUTOMATED EVENT RUNSHEET GENERATOR
+====================================================================
+Status: PROPOSAL — no code exists for this yet. This is a forward design
+spec, not an as-built doc (contrast with AS_BUILT_sales_proposal_automation
+.txt, which documents the sibling pipeline that already ships). Once built,
+this file's name/status should be updated the same way (see NAMING NOTE at
+the end of this doc).
+
+Written to reuse as much of the existing sales-proposal automation's
+infrastructure and lessons learned as possible, rather than build a
+parallel stack from scratch.
+
+
+OPEN DESIGN QUESTION — RESOLVE BEFORE BUILDING
+-------------------------------------------------
+The existing demo-notes email already contains several runsheet-relevant
+fields (AV test time, delivery window, arrival contact, day-by-day
+schedule blocks — see OCR extraction schema in the sibling pipeline). Two
+ways to trigger this automation:
+
+  Option A (assumed below): a SEPARATE, later trigger — runsheets are
+  finalized much closer to the actual event date than the initial demo
+  call, and details commonly change in between (final headcount, updated
+  contact, revised schedule). Triggering off a distinct "confirmed
+  booking" or "final details" email keeps the runsheet accurate to
+  reality at event time rather than stale from the first demo call.
+
+  Option B: extend the EXISTING pipeline run (pipeline.py) to also
+  generate a runsheet immediately alongside the proposal, from the same
+  OCR'd demo notes. Simpler (one trigger, one OCR call, no new Gmail
+  query), but the runsheet would only ever be as accurate as day-one
+  demo notes, with no mechanism to pick up later changes.
+
+This spec assumes Option A. If Option B is actually preferred, most of
+this doc still applies to the "generate a runsheet slide deck" logic
+(Steps D-H below); just delete Steps A-C and Step I's dedup/trigger
+mechanics, since pipeline.py's existing dedup/trigger would apply instead.
+
+
+GOAL
+----
+Automatically generate an event-day runsheet (a time-blocked
+production/logistics schedule) as a Google Slides deck from confirmed
+booking/final-details correspondence, using pre-defined runsheet
+templates, and file it alongside that client's existing proposal in
+Drive.
+
+
+INTEGRATION & PREREQUISITES (all already proven by the sibling pipeline)
+---------------------------------------------------------------------------
+- Email Provider: Gmail API — reuse src/gmail_service.py's patterns
+  (search_matching_emails, get_image_attachment/get_thread, thread-based
+  notifications) as-is; add a new trigger query, don't fork the module.
+- OCR / Entity Extraction: Anthropic Claude API (claude-opus-5), vision or
+  text input — reuse src/ocr_service.py's forced-tool-call pattern with a
+  new extraction schema (see Step A).
+- Storage: Google Drive API — reuse src/drive_service.py's
+  create_client_folder() UNCHANGED, so the runsheet lands in the SAME
+  "[client_org] [year]" folder the proposal automation already created.
+- Presentation Tool: Google Slides API — new logic needed for table
+  population (see Step G); reuse src/logo_service.py UNCHANGED for the
+  cover-slide client logo.
+- Dedup / Audit Log: Supabase — reuse the pattern in
+  src/supabase_service.py against a NEW table (see PROPOSED CONFIG),
+  don't share the existing proposal_demo_notes_email_logs table (these
+  are logically distinct workflows with different failure/retry needs).
+
+
+TECHNICAL SPECIFICATIONS & STACK REQUIREMENTS
+----------------------------------------------
+- Same stack as the sibling pipeline: Python 3.10+, claude-opus-5,
+  google-api-python-client, anthropic, supabase, python-dotenv, requests.
+  No new dependencies anticipated.
+- New module: src/runsheet_service.py (extraction + Slides-table
+  population logic) — everything else is reuse.
+- Entry point: either a new main_runsheet.py -> a new
+  runsheet_pipeline.run_once(), scheduled as its own routine, OR folded
+  into the existing hourly routine as an additional check — recommend a
+  SEPARATE routine/cron, since this trigger fires on a different signal
+  and shouldn't share failure blast radius with the proposal pipeline.
+
+
+DETAILED WORKFLOW ARCHITECTURE
+--------------------------------
+[ Gmail Trigger Filter: confirmed-booking / final-details email ]
+        |
+        v
+[ Dedup Check: Supabase is_processed? ] --(yes)--> [ skip ]
+        |
+       (no)
+        v
+[ Step A: OCR & Runsheet-Field Extraction ]
+        |
+        v
+[ Missing required fields? ] --(yes)--> [ Error notification + log, stop ]
+        |
+       (no)
+        v
+[ Step B: Send "Started" Notification Thread ]
+        |
+        v
+[ Step C: Match to Existing Client Folder / Proposal ]
+        |
+        v
+[ Step D: Runsheet Template Selection ]
+        |
+        v
+[ Step E: Duplicate Template into Client's EXISTING Folder ]
+        |
+        v
+[ Step F: Populate Header Fields + Client Logo (separate batchUpdate) ]
+        |
+        v
+[ Step G: Populate Schedule Table(s) (separate batchUpdate per table) ]
+        |
+        v
+[ Step H: Pre-Send QA Check -> success / needs_review ]
+        |
+        v
+[ Step I: Send Final Notification + Log to Supabase ]
+
+
+TRIGGER CRITERIA
+-----------------
+1. New Gmail filter query (config value, name TBD e.g.
+   RUNSHEET_TRIGGER_QUERY) — needs a real-world sample email to define
+   precisely, but conceptually: a confirmed-booking or final-logistics
+   email, distinguishable from the initial demo-notes trigger (e.g. a
+   different subject convention, or arriving from event coordination
+   contacts rather than sales). DO NOT reuse the existing
+   GMAIL_TRIGGER_QUERY unmodified — that would double-process the same
+   email under two different pipelines.
+2. Attachment may be an image/PDF (handwritten/scanned final details) OR
+   the extraction may need to run against email BODY TEXT rather than an
+   attachment, since final-details correspondence is more likely to be
+   typed than the original handwritten demo notes. ocr_service.py's
+   extract_fields() currently only accepts image/PDF input — extending it
+   (or adding a text-input variant) is in scope for this build.
+3. Dedup against a NEW Supabase table (see PROPOSED CONFIG) keyed on
+   Gmail message ID, same is_processed pattern as the sibling pipeline.
+
+
+EXECUTION STEPS
+-----------------
+
+Step A: Runsheet-Field Extraction (new: src/runsheet_service.py, modeled
+on src/ocr_service.py's EXTRACTION_TOOL pattern)
+- Proposed extraction schema (extract_runsheet_details tool):
+  client_org, event_date, venue, arrival_time, av_test_time,
+  delivery_start, delivery_end, duration, contact_on_arrival,
+  contact_phone, schedule_blocks (array of {time, activity, owner,
+  notes}), equipment_needed, catering_notes, contingency_notes,
+  unclear_fields.
+- Required fields (proposed): client_org, event_date, schedule_blocks
+  (at least one block) — mirrors the sibling pipeline's
+  missing_required_fields() gate pattern.
+
+Step B: Send "Started" Notification Thread — identical pattern to the
+sibling pipeline's Step B (src/gmail_service.py, reused as-is), subject
+e.g. "Automation: Runsheet for [client_org] — [event_date]".
+
+Step C: Match to Existing Client Folder / Proposal
+- Look up the client's existing "[client_org] [year]" Drive folder
+  (drive_service.create_client_folder() already reuses-if-exists, so
+  calling it again here is safe and correct — it will find the same
+  folder the proposal automation created).
+- Open design question: if no matching folder/proposal exists yet for
+  this client_org (e.g. name mismatch, or a runsheet requested for a
+  client who never went through the proposal pipeline), decide whether to
+  (a) create a new folder anyway, or (b) flag for manual review rather
+  than silently creating an orphaned folder. Recommend (b).
+
+Step D: Runsheet Template Selection
+- New Drive folder needed (e.g. runsheet_templates_drive_link in
+  project_vars.txt), separate from the existing templates_drive_link —
+  runsheet decks are structurally different (time-blocked tables, not
+  narrative proposal slides) and should not be selectable by the
+  proposal pipeline's template_selector.py or vice versa.
+- Reuse template_selector.py's list-by-name-containing-"template" +
+  Claude-confidence-pick pattern against this new folder; a template
+  probably distinguishes by event length/format (e.g. single-day vs.
+  multi-day, keynote vs. workshop) rather than by service type.
+
+Step E: Duplicate Template — identical pattern to the sibling pipeline's
+Step F (drive_service.duplicate_template(), reused as-is), named e.g.
+"[client_org] Runsheet - [event_date]", placed in the folder from Step C.
+
+Step F: Header Fields + Client Logo
+- Header text shapes (event title, date, venue, contact) can likely reuse
+  slides_rewriter.py's extract_text_shapes()/_build_rewrite_requests()
+  pattern directly — same "rewrite each shape to fit new client" LLM
+  approach as the proposal deck's cover slide.
+- Client logo: reuse src/logo_service.py's find_logo_url() and
+  slides_rewriter.py's find_logo_placeholders()/_build_logo_requests()
+  UNCHANGED. Apply the SAME lesson from the sibling pipeline: logo goes
+  in its own isolated batchUpdate, never bundled with Step G's table
+  population, for the identical reason (an unverified guessed logo URL
+  must never be able to roll back the schedule data).
+
+Step G: Schedule Table Population — NEW logic, no equivalent in the
+sibling pipeline
+- Runsheet templates are expected to contain a Slides table object (not
+  freeform text shapes) for the time-blocked schedule, likely one table
+  per event day.
+- Requires new batchUpdate request types not currently used anywhere in
+  this codebase: insertTableRows (to grow the table to match
+  schedule_blocks' length) and text insertion into specific table cells
+  by (rowIndex, columnIndex) rather than by a single shape objectId — the
+  existing deleteText/insertText helpers in slides_rewriter.py assume a
+  single text-shape objectId and will need a table-aware variant.
+- Sent as its OWN batchUpdate, separate from Step F, so a malformed table
+  update can't roll back the header/logo work (same isolation principle
+  as the sibling pipeline's Steps G/H split).
+- No direct equivalent of the "10-15% length budget" concern from the
+  proposal pipeline — table rows can grow/shrink to fit content, so
+  overflow risk here is more about ROW COUNT exceeding what fits on one
+  slide than text length; needs its own overflow heuristic if template
+  tables have a fixed max visible row count.
+
+Step H: Pre-Send QA Check — mirrors the sibling pipeline's Step I pattern:
+- No client folder/proposal match found (Step C) => needs_review.
+- Logo guess unverifiable or failed to apply => needs_review (identical
+  wording pattern to the sibling pipeline).
+- Any schedule_blocks entry with an ambiguous/unclear time or owner
+  (surfaced via unclear_fields) => needs_review.
+- Row count exceeding template's visible capacity (Step G) => needs_review.
+
+Step I: Final Notification + Audit Log — identical pattern to the sibling
+pipeline's Step J: reply in the same Gmail thread with the Slides link,
+upsert to the new Supabase table with status/error_message/proposal_link.
+
+
+PROPOSED CONFIG (does not exist yet — for review before implementation)
+----------------------------------------------------------------------------
+New .env values:
+  RUNSHEET_TRIGGER_QUERY          (Gmail filter — needs a real sample email
+                                    to define precisely)
+  RUNSHEET_FALLBACK_TEMPLATE_ID   (optional, mirrors FALLBACK_TEMPLATE_ID)
+
+New project_vars.txt entries:
+  runsheet_templates_drive_link
+
+New Supabase table (mirrors proposal_demo_notes_email_logs' shape):
+  runsheet_request_email_logs
+    id, created_at, message_id, is_processed, status, error_message,
+    runsheet_link, processed_at
+
+
+CARRIED-FORWARD LESSONS (from AS_BUILT_sales_proposal_automation.txt —
+apply from day one here rather than rediscovering them)
+--------------------------------------------------------------------------
+1. Any new outbound call this process makes to a third-party host will
+   need that host allowlisted in the scheduled routine's Network Access
+   settings — confirm this BEFORE relying on any new integration in
+   production, not after a silent failure.
+2. Prefer passing an unvalidated URL through to a Google API (which
+   fetches it server-side, exempt from this sandbox's network policy)
+   over having this process validate it first — but if you do that, ALSO
+   isolate that specific batchUpdate request from anything else in the
+   same call, since an unverified guess can still fail server-side and
+   batchUpdate is all-or-nothing.
+3. Reuse drive_service.create_client_folder()'s find-or-create pattern
+   for idempotency — don't write a new folder-creation path that might
+   create duplicate client folders.
+
+
+NAMING NOTE — WHEN THIS ACTUALLY GETS BUILT
+-----------------------------------------------
+Rename this file (or supersede it with a new one) to
+AS_BUILT_runsheet_automation.txt once implemented, following the same
+convention as the sales-proposal automation: this DESIGN_SPEC file
+documents intent before the fact; an AS_BUILT file documents reality after
+it, and should be the one kept in sync with the code going forward — this
+file becomes historical context at that point, not a maintained document.

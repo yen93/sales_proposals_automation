@@ -24,7 +24,9 @@ client unchecked.
 INTEGRATION & PREREQUISITES
 ----------------------------
 - Email Provider: Gmail API (OAuth2, refresh-token flow)
-- OCR / Entity Extraction: Anthropic Claude API (claude-opus-5), vision input
+- Alternate Trigger: Google Forms API (OAuth2, same refresh-token flow, extra
+  scope) — see ALTERNATE TRIGGER: GOOGLE FORM INTAKE below
+- OCR / Entity Extraction: OpenAI API (gpt-5.6-luna), vision + PDF input
 - Storage: Google Drive API
 - Presentation Tool: Google Slides API
 - Dedup / Audit Log: Supabase (Postgres via supabase-py)
@@ -36,12 +38,14 @@ TECHNICAL SPECIFICATIONS & STACK REQUIREMENTS
 - Language: Python 3.10+ (uses PEP 604/585 type hints — list[dict], str | None)
 - Key dependencies (requirements.txt):
   - google-api-python-client, google-auth, google-auth-oauthlib
-  - anthropic
+  - openai
   - supabase
   - python-dotenv
   - requests
-- Model: claude-opus-5 for all three LLM calls (OCR extraction, template
-  selection, slide-text rewrite, Fathom meeting matching)
+- Model: gpt-5.6-luna (config.OPENAI_MODEL, overridable via env) for all four
+  LLM calls (OCR extraction, template selection, slide-text rewrite, Fathom
+  meeting matching) via the shared forced-function-call helper in
+  src/llm_client.py
 - Entry point: main.py -> pipeline.run_once() — designed to be invoked
   repeatedly (cron/routine); the Supabase dedup check makes reruns safe.
 - Deployment: runs both locally and as a scheduled cloud routine
@@ -130,6 +134,11 @@ TRIGGER CRITERIA
    Messages without a supported attachment are skipped, not errored.
 3. Check the Gmail message ID is NOT already logged in the Supabase table
    proposal_demo_notes_email_logs with is_processed = true.
+4. In parallel, every response to the "Demo Call Notes Intake" Google Form
+   with a file-upload answer is also a trigger candidate, deduped against
+   the separate form_demo_notes_intake_logs table by response ID — see
+   ALTERNATE TRIGGER: GOOGLE FORM INTAKE below. This is additive: it runs
+   alongside the Gmail trigger, not instead of it.
 
 
 EXECUTION STEPS
@@ -137,16 +146,22 @@ EXECUTION STEPS
 
 Step A: Document OCR & Entity Extraction (src/ocr_service.py)
 - Download the attachment (image or PDF).
-- Send to claude-opus-5 (vision) via a forced tool call (extract_demo_notes).
+- Send to gpt-5.6-luna (vision/PDF) via a forced function call (extract_demo_notes).
 - Extracted fields: client_org, contact_name, event_date,
   recommended_service, audience_size, location, summary, scope,
   raw_transcript, unclear_fields (list of fields that were illegible or
   absent — the model is instructed to flag rather than guess).
-- Required fields (config.REQUIRED_OCR_FIELDS): client_org,
-  recommended_service, summary. If any required field is missing/empty, OR
-  listed in unclear_fields, the run stops: an error reply is sent in the
+- Required fields (config.REQUIRED_OCR_FIELDS): recommended_service,
+  summary. If any required field is missing/empty, OR listed in
+  unclear_fields, the run stops: an error reply is sent in the
   notification thread and the message is logged to Supabase with
   status="error" (so it will NOT be retried automatically).
+- client_org is NOT a hard-required field: if it's missing/empty or listed
+  in unclear_fields, the pipeline still proceeds using the placeholder
+  "Unknown Client" (folder/deck name, subject line, etc.), and flags this
+  as a qa_note on the final "ready" notification so a human renames things
+  and confirms the real client before sending externally. Status is
+  reported as "needs_review" rather than "success" in this case.
 
 Step B: Send "Started" Notification Thread (src/gmail_service.py)
 - New (non-reply) Gmail thread, subject:
@@ -156,7 +171,7 @@ Step B: Send "Started" Notification Thread (src/gmail_service.py)
 
 Step C: Fathom Call-Recording Match (src/fathom_service.py) — best-effort
 - If FATHOM_API_KEY is configured: fetches recent Fathom recordings
-  (default lookback: FATHOM_LOOKBACK_DAYS = 30 days) and asks claude-opus-5
+  (default lookback: FATHOM_LOOKBACK_DAYS = 30 days) and asks gpt-5.6-luna
   to match one to this client's demo notes (by name/contact/date
   proximity), requiring at least "medium" confidence.
 - On a match, the full meeting JSON is added to ocr_fields as
@@ -170,7 +185,7 @@ Step D: Template Selection (src/template_selector.py)
   templates_drive_link whose name contains "template" (case-insensitive) —
   not a fixed naming prefix. As of 2026-08-05 there are 4: Uncharted Ice,
   Uncharted Waters, Crossing the Ice Keynote, Crossing the Ditch Keynote.
-- Asks claude-opus-5 to pick the best match against the OCR'd fields, with
+- Asks gpt-5.6-luna to pick the best match against the OCR'd fields, with
   a confidence level (high/medium/low) and reasoning.
 - If confidence is "low" AND config.FALLBACK_TEMPLATE_ID is set, the
   fallback template is used instead of the model's low-confidence pick.
@@ -190,7 +205,7 @@ Step F: Presentation Duplication (src/drive_service.py)
 Step G: Slide Text Rewrite (src/slides_rewriter.py) — sent as its OWN
 batchUpdate, separate from Step H
 - This is NOT {{TOKEN}}-style find/replace. Every non-empty text shape's
-  full content is sent to claude-opus-5, which rewrites each shape to fit
+  full content is sent to gpt-5.6-luna, which rewrites each shape to fit
   the new client using the demo notes (+ Fathom notes if matched) as
   source material, while:
   - preserving each shape's structure (bullets, headers, tone/length)
@@ -302,11 +317,59 @@ Error path (any unhandled exception, at any step):
   duplicated file or clear is_processed to allow a retry).
 
 
+ALTERNATE TRIGGER: GOOGLE FORM INTAKE (src/form_intake_service.py)
+-----------------------------------------------------------------------------
+Added to give sales staff a way to start a proposal that doesn't depend on
+typing an exact Gmail subject line — see TRIGGER CRITERIA point 4.
+- A Google Form ("Demo Call Notes Intake"), owned by the same
+  myadventuregroup.com.au identity behind GOOGLE_REFRESH_TOKEN, with items
+  titled EXACTLY: "Client org", "Contact name" (optional text), "Event date"
+  (date question — its answer still comes through the API's textAnswers,
+  same as a text question), "Proposal Type" (multiple choice, used for the
+  pilot gate below), and "Demo call notes" (required file upload). Titles
+  must match src/form_intake_service.py's FIELD_ITEM_TITLES/
+  FILE_UPLOAD_ITEM_TITLE constants exactly, since responses are matched by
+  title, not position.
+- PILOT GATE (pipeline.py's FORM_ALLOWED_PROPOSAL_TYPE): as of this build,
+  run_once() only processes a form response if its "Proposal Type" answer
+  is "Uncharted Ice" (case-insensitive) — every other proposal type
+  submitted through the Form is skipped (logged, not marked processed, so
+  it'll be picked up automatically once/if this gate is widened or
+  removed). This does NOT apply to the Gmail trigger path, which has no
+  such restriction. This is a deliberate pilot restriction, not a technical
+  limitation — remove/expand FORM_ALLOWED_PROPOSAL_TYPE once the Form path
+  is trusted for other proposal types.
+- Read via the Forms API (forms.googleapis.com), NOT by polling the Drive
+  folder the file-upload question writes to — the API call returns both the
+  uploaded file's ID and the typed text answers in one response, whereas
+  the folder only has the file. config.INTAKE_FORM_ID unset (empty
+  project_vars.txt value) disables this path entirely — run_once() skips it.
+- Any typed "Client org" / "Contact name" / "Event date" answer overrides
+  the OCR guess for that field (Step A still runs unconditionally against
+  the uploaded file for everything else — summary, scope,
+  recommended_service, raw_transcript).
+- Dedup: form_demo_notes_intake_logs, keyed on Forms response ID — same
+  shape/semantics as proposal_demo_notes_email_logs, kept as a SEPARATE
+  table (not shared) so the two trigger sources can never collide.
+- Everything downstream of OCR (Fathom match, template selection, folder/
+  deck creation, Gmail started/ready notifications) is IDENTICAL code to
+  the email path — pipeline.py's _process_demo_notes() is the shared core;
+  process_email() and process_form_response() only differ in how they
+  obtain image_bytes/mime_type and which dedup table they write to.
+- Requires the "https://www.googleapis.com/auth/forms.responses.readonly"
+  scope on GOOGLE_REFRESH_TOKEN — re-run oauth_setup.py to mint a token
+  with this scope before this path can authenticate; the existing token
+  (minted before this scope was added) will not have it.
+
+
 ENVIRONMENT & CONFIGURATION
 ------------------------------
 .env (secrets — never committed):
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
-  ANTHROPIC_API_KEY
+    (must include the forms.responses.readonly scope — see ALTERNATE
+    TRIGGER above)
+  OPENAI_API_KEY
+  OPENAI_MODEL                    (optional, default gpt-5.6-luna)
   SUPABASE_URL, SUPABASE_SERVICE_KEY
   FATHOM_API_KEY                  (optional — enrichment skipped if unset)
   GMAIL_TRIGGER_QUERY             (optional override)
@@ -315,7 +378,12 @@ ENVIRONMENT & CONFIGURATION
 
 project_vars.txt (non-secret, JSON array with one object):
   demo_notes_recipients, notification_recipients,
-  proj_drive_link, templates_drive_link
+  proj_drive_link, templates_drive_link,
+  intake_form_id                  (optional — empty disables the Form path)
+  form_uploads_drive_link         (optional, informational — the Drive
+                                    folder Forms writes uploaded files to;
+                                    not read by code, since the file is
+                                    fetched by ID from the Forms API response)
 
 Note: the original spec named the Google token env var "GMAIL_TOKEN" — the
 actual variable is GOOGLE_REFRESH_TOKEN (OAuth2 refresh-token flow via
@@ -328,10 +396,19 @@ or adding any new third-party integration)
 -----------------------------------------------------------------------------
 1. The scheduled cloud routine runs in a network-restricted sandbox. Any
    outbound call this process makes itself to a host beyond Gmail/Drive/
-   Slides/Anthropic's default-allowlisted domains needs that host added to
-   the environment's Network Access allowlist — Supabase and Fathom both
+   Slides's default-allowlisted domains needs that host added to the
+   environment's Network Access allowlist — Supabase and Fathom both
    needed this. This fails SILENTLY where code catches the exception
    (e.g. logo lookup, Fathom) rather than raising.
+   NOTE (2026-09-08 Claude/Anthropic -> OpenAI migration): api.openai.com's
+   allowlist status in that sandbox is UNVERIFIED — api.anthropic.com may
+   have been default-allowlisted where api.openai.com is not. Since the
+   OCR/template-selection/Fathom-match/slide-rewrite calls are NOT
+   exception-swallowed the way logo lookup is (see pipeline.py's outer
+   try/except, which marks the whole proposal "error" instead), a blocked
+   host here would fail loudly rather than silently — but this should still
+   be confirmed before re-enabling the hourly routine (currently
+   enabled=false per above).
 2. Google's favicon endpoint (www.google.com/s2/favicons) 301-redirects to
    a sharded, per-request t0-t3.gstatic.com host — impossible to allowlist
    reliably. Swapping the validation call to a different single-host
@@ -383,7 +460,7 @@ For a teammate to run it:
    https://drive.google.com/drive/folders/13DKRuTp95VWeDLIBPOYefiLQepYCVKbG
    and place it in the project root. Never commit it — it's the same
    credential set the cloud routine uses (Google refresh token tied to
-   julienne@myadventuregroup.com.au, plus Anthropic/Supabase/Fathom keys).
+   julienne@myadventuregroup.com.au, plus OpenAI/Supabase/Fathom keys).
 4. In Claude Code, run `/run-proposal-pipeline` (or just ask it to run the
    proposal pipeline).
 

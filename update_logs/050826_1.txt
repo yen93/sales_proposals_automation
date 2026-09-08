@@ -1,0 +1,23 @@
+Fix is pushed (ebe24cd) and applied directly to the pending deck from your test run. Here's the full picture:
+
+Root cause of round 2: The routine did pick up last fix within about an hour of the push (confirmed via RemoteTrigger — it clones main fresh, no pinned ref). But that fix had swapped the validation call from www.google.com to icons.duckduckgo.com, a brand-new host nobody had allowlisted yet — so it failed for a new reason, not the old one.
+
+What I changed instead of chasing another allowlist entry: find_logo_url() now makes no outbound network call at all. It just builds a guessed Google favicon URL and hands it straight to Slides' replaceImage, which fetches it server-side
+on Google's own infrastrudbox — so it's permanently
+
+The trade-off you're accepting: since there's no more validation, every successful placement now gets a QA note too — "client logo was auto-guessed from domain '...' — verify it's actually {client}'s logo before sending" — not just genuine misses. Every proposal will land as needs_review from now on for this reason alone.
+
+Two other things I noticeoutine config, unrelatedto this bug, flagging so you're aware:
+- The routine is currentling just fired. Worthchecking if that's intentional.
+- The routine's stored config contains live plaintext credentials (Anthropic key, Supabase service key, Fathom key, Google client secret + refresh token) in its prompt text, readable via the routines API/dashboard. That's presumably just how it bootstraps secrets today — not a new leak — but worth knowing.
+
+I saved all of this to memory so it doesn't need re-deriving next time.makes no outbound network call at all. It just builds a guessed Google favicon URL and hands it straight to Slides' replaceImage, which fetches it server-side on Google's own infrastructure — never through our sandbox — so it's permanently
+immune to whatever this es. Applied it to thesed logo.
+
+The trade-off you're accepting: since there's no more validation, every successful placement now gets a QA note too — "client logo was auto-guessed from domain '...' — verify it's actually {client}'s logo before sending" — not just genuine misses. Every proposal will land as needs_review from now on for this reason alone.
+
+Two other things I noticeoutine config, unrelatedto this bug, flagging so you're aware:
+- The routine is currentling just fired. Worthchecking if that's intentional.
+- The routine's stored config contains live plaintext credentials (Anthropic key, Supabase service key, Fathom key, Google client secret + refresh token) in its prompt text, readable via the routines API/dashboard. That's presumably just how it bootstraps secrets today — not a new leak — but worth knowing.
+
+I saved all of this to memory so it doesn't need re-deriving next time.

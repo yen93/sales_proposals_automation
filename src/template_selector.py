@@ -1,12 +1,9 @@
-"""Lists master templates in Drive and asks Claude to pick the best match."""
+"""Lists master templates in Drive and asks an LLM to pick the best match."""
 
 import json
 
-import anthropic
-
 import config
-
-MODEL = "claude-opus-5"
+from src import llm_client
 
 SELECTION_TOOL = {
     "name": "select_template",
@@ -60,31 +57,20 @@ def pick_template(drive, ocr_fields: dict) -> dict:
     if not templates:
         raise RuntimeError("No files containing 'template' found in templates folder")
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        tools=[SELECTION_TOOL],
-        tool_choice={"type": "tool", "name": "select_template"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Pick the best-matching proposal template for this client from the "
-                    "list below.\n\n"
-                    f"Available templates:\n{json.dumps(templates, indent=2)}\n\n"
-                    f"Client context extracted from demo notes:\n"
-                    f"{json.dumps(ocr_fields, indent=2)}"
-                ),
-            }
-        ],
+    content = [
+        {
+            "type": "input_text",
+            "text": (
+                "Pick the best-matching proposal template for this client from the "
+                "list below.\n\n"
+                f"Available templates:\n{json.dumps(templates, indent=2)}\n\n"
+                f"Client context extracted from demo notes:\n"
+                f"{json.dumps(ocr_fields, indent=2)}"
+            ),
+        }
+    ]
+    result = llm_client.call_tool(content, SELECTION_TOOL)
+    result["template_title"] = next(
+        (t["title"] for t in templates if t["id"] == result["template_id"]), None
     )
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "select_template":
-            result = dict(block.input)
-            result["template_title"] = next(
-                (t["title"] for t in templates if t["id"] == result["template_id"]), None
-            )
-            return result
-    raise RuntimeError("Claude did not return the expected select_template tool call")
+    return result

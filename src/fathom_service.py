@@ -9,14 +9,13 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import anthropic
 import requests
 
 import config
+from src import llm_client
 
 log = logging.getLogger("fathom_service")
 
-MODEL = "claude-opus-5"
 API_BASE = "https://api.fathom.ai/external/v1"
 
 MATCH_TOOL = {
@@ -95,33 +94,22 @@ def find_matching_notes(ocr_fields: dict) -> Optional[str]:
         for m in meetings
     ]
 
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        tools=[MATCH_TOOL],
-        tool_choice={"type": "tool", "name": "match_meeting"},
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    "Which of these recorded calls (if any) corresponds to the demo-notes "
-                    "email below? Match on client/company name, contact name, and date "
-                    "proximity. Only pick one if you're reasonably confident it's the same "
-                    "call — otherwise return an empty meeting_id with confidence 'none'.\n\n"
-                    f"Demo notes:\n{json.dumps(ocr_fields, indent=2)}\n\n"
-                    f"Candidate calls:\n{json.dumps(candidates, indent=2, default=str)}"
-                ),
-            }
-        ],
-    )
+    content = [
+        {
+            "type": "input_text",
+            "text": (
+                "Which of these recorded calls (if any) corresponds to the demo-notes "
+                "email below? Match on client/company name, contact name, and date "
+                "proximity. Only pick one if you're reasonably confident it's the same "
+                "call — otherwise return an empty meeting_id with confidence 'none'.\n\n"
+                f"Demo notes:\n{json.dumps(ocr_fields, indent=2)}\n\n"
+                f"Candidate calls:\n{json.dumps(candidates, indent=2, default=str)}"
+            ),
+        }
+    ]
+    match = llm_client.call_tool(content, MATCH_TOOL)
 
-    match = None
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "match_meeting":
-            match = block.input
-
-    if not match or not match.get("meeting_id") or match.get("confidence") in ("none", "low"):
+    if not match.get("meeting_id") or match.get("confidence") in ("none", "low"):
         return None
 
     meeting = next((m for m in meetings if _meeting_id(m) == match["meeting_id"]), None)
