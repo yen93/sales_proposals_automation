@@ -1,0 +1,91 @@
+================================================================================
+CHAT HISTORY EXPORT — 2026-09-15
+Session: Brought the Uncharted Ice proposal automation up to a sales
+specialist's gold-standard deck — made the slide rewriter format-preserving
+and replaced the Uncharted Ice template with a copy of the specialist's deck
+================================================================================
+
+--------------------------------------------------------------------------------
+USER:
+Pointed at "150926 - modifications.txt", a slide-by-slide change request
+comparing a routine-generated Uncharted Ice deck for client SWIM
+(1uIn7...z2OSU) against a sales specialist's hand-built gold-standard version
+(1t6DS...SWqFY), with the demo notes at drive file 1AOK9...Z4h79. The requests
+covered slide 1 logo/text placement + fonts/colours, slide 3 bullet colour +
+"Learning OBJECTIVES" partial highlight + lowered text box, slide 4 "PROGRAM
+COMPONENTS" partial highlight, copying slides 5/6/7 (7 missing entirely) and
+8-11/13 wholesale, and slide 12 "YOUR INVESTMENT" partial highlight +
+DESIGN/DELIVERY formatting/bullet colours — all "tailored to the demo notes."
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Read the modifications file, then explored the codebase (two Explore agents)
+and pulled all three Drive files' text via the Google Drive connector.
+
+Key architectural finding: the routine (pipeline.py -> src/slides_rewriter.py)
+only COPIES a template deck and swaps text/logo inside existing slide shapes —
+it sets no positions/fonts/colours/highlights and never adds/removes/reorders
+slides. So all of that is a property of the TEMPLATE, not tunable code.
+Worse, the rewriter replaced text via deleteText(ALL)+insertText, which
+destroys run-level formatting (per-word highlights, text/bullet colour) even
+when text is unchanged. Slides bullet glyphs inherit the paragraph's first-run
+foreground colour, so restoring that fixes bullet colour too.
+
+Confirmed with the user via AskUserQuestion: fix the AUTOMATION (not a one-off
+deck); do NOT re-run SWIM (user will test manually); reach the specialist's
+formatting by adopting the specialist deck as the template; REPLACE the
+existing Uncharted Ice template. Identified the template to replace as
+1smS-ABtkkk... ("Template of UNCHARTED ICE (CAS X [CLIENT])").
+
+A Plan agent designed the rewriter change; wrote a plan file and exited plan
+mode (approved). Implemented Part 2 in src/slides_rewriter.py: skip shapes the
+model returns unchanged (normalized compare) so static-header highlights
+survive; opt-in PRESERVE_TAG_KEYWORDS alt-text tag to hard-exclude a shape;
+capture each rewritten shape's dominant text style and re-apply via
+updateTextStyle (explicit fields mask) after insert to restore text + bullet
+colour; request order delete/insert/bullets/style/shrink-last; additive return
+keys (preserved_shapes, unchanged_shapes). Verified with a standalone
+assertion test (tagged/unchanged shapes emit zero requests and never leak into
+the prompt; rewritten shapes carry captured foreground+font; shrink stays
+last).
+
+While building the template, discovered (via read-only Slides API probes +
+thumbnails, using the repo's own google_clients) that the specialist deck's
+COVER (slide 1) keeps its client logo, tagline, and date on a shared custom
+LAYOUT, which the routine never edits — so a straight copy can't auto-tailor
+the cover or swap the client logo. Slides 2-13 keep editable content as slide
+pageElements and work fine. Raised this; user directed: "do not touch the
+specialist's file, use it as reference, copy every slide, just tailor the
+text, that's it" — i.e. no de-tailoring, no slide-1 surgery, no tagging.
+
+Followed that: created the new template as a COPY of the specialist deck into
+the templates folder — 1Ho1sCDir6bu3UfsJF3MWyJuSchGjjWQ_f9aAs9viM50, 13
+slides — leaving the specialist file untouched. Archived the old template by
+renaming its title so it no longer contains "template" (selector skips it;
+file kept, reversible). Verified template_selector.list_templates() now lists
+the new one plus Waters / Crossing-the-Ice / Crossing-the-Ditch. Validated the
+new template through the real extractor code path (read-only): 45 editable text
+shapes, all with captured style, 4 bulleted, 0 preserve-tagged, 0 logo
+placeholders on slides (cover logo is layout-resident, as flagged).
+
+Updated docs: AS_BUILT_sales_proposal_automation.txt (Step D template swap +
+Step G format preservation and the layout/group limitation), as_built.txt
+(slides_rewriter description), and added update_logs/150926_1.txt. Did NOT
+re-run SWIM. Flagged two things for the user's manual test: the cover
+(layout-resident logo/date/tagline, finished by hand) and slide 12's mixed-
+style DESIGN/DELIVERY box (uniform-style restore keeps brand colour but can't
+reproduce its internal highlight).
+
+--------------------------------------------------------------------------------
+USER:
+Ran /dcp to save the chat, update as_built.txt/CLAUDE.md, and commit + push.
+
+--------------------------------------------------------------------------------
+ASSISTANT:
+Wrote this chat-history export, updated as_built.txt (done during the session),
+reviewed CLAUDE.md for needed changes, and committed + pushed the session's
+work to origin/main.
+
+================================================================================
+END OF EXPORT
+================================================================================

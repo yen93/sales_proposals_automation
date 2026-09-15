@@ -1,0 +1,59 @@
+2026-09-15 — Bring Uncharted Ice output up to the sales-specialist gold standard
+(request: "150926 - modifications.txt").
+
+CONTEXT
+A routine-generated Uncharted Ice deck (1uIn7...z2OSU) for client SWIM did not
+match a sales specialist's hand-built version (1t6DS...SWqFY): wrong/absent
+per-word highlights, bullet colours, placement, a missing "THE PROGRAM
+FRAMEWORK" slide, etc. Root cause: the routine only copies a template deck and
+swaps text/logo inside existing slide shapes — all placement/fonts/colours/
+highlights/slide-structure come from the TEMPLATE, and the rewriter's
+deleteText+insertText was destroying run-level formatting on every rewrite.
+
+DECISIONS (confirmed with user)
+- Fix the automation (not a one-off deck); do NOT re-run SWIM (user tests it).
+- Reach the specialist's formatting by using the specialist deck AS the
+  template. User: "do not touch the specialist's file, use it as reference,
+  copy every slide, just tailor the text." So: no de-tailoring, no slide-1
+  surgery, no tagging.
+- Replace the existing Uncharted Ice template.
+
+CHANGES
+1. src/slides_rewriter.py — format-preserving rewrite:
+   - Skip shapes the model returns unchanged (normalized compare) → their
+     formatting incl. per-word highlights on static section titles is
+     untouched.
+   - New opt-in PRESERVE_TAG_KEYWORDS alt-text tag hard-excludes a shape from
+     rewriting (not used by any template yet; insurance for reworded headers).
+   - Capture each rewritten shape's dominant text style before delete and
+     re-apply via updateTextStyle (explicit fields mask) after insert; this
+     restores text colour/font AND bullet-glyph colour (glyph inherits first
+     run's foreground). Uniform-style restore only (documented limitation).
+   - Order per rewritten shape: delete, insert, createParagraphBullets,
+     captured-style updateTextStyle, then overflow-shrink updateTextStyle last.
+   - rewrite() return dict is additive: preserved_shapes, unchanged_shapes;
+     text_shapes_updated redefined = shapes actually rewritten. pipeline.py
+     unchanged (reads only logo_replaced/overflow_risk_ids).
+   - Verified with a standalone assertion test (tagged/unchanged shapes emit
+     zero requests and never leak into the prompt; rewritten shapes carry the
+     captured foreground+font; shrink stays last).
+
+2. Template swap (Google Drive / Slides, done via one-off scripts):
+   - New template = a COPY of the specialist deck into the templates folder:
+     1Ho1sCDir6bu3UfsJF3MWyJuSchGjjWQ_f9aAs9viM50
+     "Template of UNCHARTED ICE (CAS X [CLIENT])", 13 slides. Specialist file
+     1t6DS... was only READ, never modified.
+   - Old template 1smS-ABtkkk... renamed (title no longer contains "template")
+     so template_selector skips it; file kept (reversible). Confirmed the
+     selector now lists the new one and 3 others.
+
+KNOWN LIMITATION / FOLLOW-UP
+- The new template's cover (slide 1) keeps its client logo, tagline, and date
+  on the deck's LAYOUT. The routine only edits slide pageElements (not
+  layouts/masters, and doesn't recurse element groups), so the cover is NOT
+  auto-tailored/swapped — it's finished by hand per client. Slides 2-13 tailor
+  normally. If auto cover-tailoring is wanted later: move that content onto
+  the slide, or extend the rewriter/logo-finder to handle layout content +
+  groups.
+- Docs updated: AS_BUILT_sales_proposal_automation.txt (Step D template swap;
+  Step G format preservation + layout limitation).

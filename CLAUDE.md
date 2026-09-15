@@ -73,6 +73,25 @@ if that becomes a problem.
   `pipeline._process_demo_notes()` directly under a distinct dedup key for a
   one-off test — see the logo/slide-rewrite verification approach used in
   the 2026-09-08 OpenAI migration).
+- **`slides_rewriter.py` is format-preserving (since 2026-09-15).** A bare
+  `deleteText+insertText` wipes run/paragraph styling, so the rewriter now:
+  (a) skips any shape the LLM returns unchanged (so per-word highlights on
+  static section titles survive), (b) supports an opt-in `do-not-rewrite`
+  alt-text tag (`PRESERVE_TAG_KEYWORDS`) that hard-excludes a shape, and
+  (c) captures each rewritten shape's dominant text style and re-applies it
+  after insert (restoring text AND bullet colour — bullet glyphs inherit the
+  first run's foreground). It restores ONE uniform style per shape; it can't
+  reproduce arbitrary multi-run styling (e.g. a highlight on one word of a
+  shape it also rewrites) — that's why mixed-style shapes like the slide-12
+  DESIGN/DELIVERY box are imperfect and headers must stay in the
+  unchanged/tagged buckets.
+- **The rewriter and logo finder only walk a slide's own `pageElements`** —
+  NOT the slide's layout/master, and they don't recurse element groups. The
+  Uncharted Ice template (replaced 2026-09-15 with a copy of a sales-
+  specialist deck, 13 slides) keeps its cover logo/date/tagline on a custom
+  LAYOUT, so those are NOT auto-tailored/swapped and are finished by hand per
+  client. If you need cover auto-tailoring, move that content onto the slide
+  or extend the walkers to handle layouts + groups.
 - **`logo_service.py` makes no outbound network call of its own** — it just
   guesses a Google-favicon URL from the client name and returns it
   unvalidated; only Slides' `replaceImage` (server-side, on Google's

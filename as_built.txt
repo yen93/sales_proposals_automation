@@ -56,7 +56,12 @@ SRC/ MODULES
   notably longer than the original — the Slides API has no working
   autofit), then separately (isolated batchUpdate, non-fatal on failure)
   swaps in a guessed client logo on any image shape tagged as a logo
-  placeholder.
+  placeholder. Format-preserving (2026-09-15): shapes the model returns
+  unchanged emit no edit at all (keeping per-word highlights on static
+  headers), shapes tagged with PRESERVE_TAG_KEYWORDS alt-text are never
+  rewritten, and rewritten shapes have their captured text style
+  re-applied after the delete/insert so text/bullet colour survives.
+  Only walks slide pageElements — not layouts/masters or element groups.
 - src/logo_service.py — guesses a client logo URL (Google favicon endpoint)
   from the client org name, with NO outbound network call of its own (the
   URL is only ever fetched server-side by Slides' replaceImage) — this

@@ -185,6 +185,17 @@ Step D: Template Selection (src/template_selector.py)
   templates_drive_link whose name contains "template" (case-insensitive) —
   not a fixed naming prefix. As of 2026-08-05 there are 4: Uncharted Ice,
   Uncharted Waters, Crossing the Ice Keynote, Crossing the Ditch Keynote.
+- 2026-09-15: the "Uncharted Ice" template was REPLACED. The old one
+  (1smS-ABtkkk2olMVptR3rj8Fum3Hz0RlsfpfWQ07ccTU) was archived by renaming it
+  so its title no longer contains "template" (so the selector skips it; the
+  file itself is kept, reversible). The new one
+  (1Ho1sCDir6bu3UfsJF3MWyJuSchGjjWQ_f9aAs9viM50, "Template of UNCHARTED ICE
+  (CAS X [CLIENT])") is a copy of a sales-specialist gold-standard deck
+  (1t6DS...SWqFY, left untouched as reference). It is 13 slides (adds "THE
+  PROGRAM FRAMEWORK") vs the old 12. NOTE its cover (slide 1) design —
+  client logo, tagline, and date — lives on the deck's LAYOUT, which Step G
+  does NOT edit (see Step G limitation), so the cover is finished manually
+  per client; the automatable per-slide text tailors normally.
 - Asks gpt-5.6-luna to pick the best match against the OCR'd fields, with
   a confidence level (high/medium/low) and reasoning.
 - If confidence is "low" AND config.FALLBACK_TEMPLATE_ID is set, the
@@ -222,6 +233,38 @@ batchUpdate, separate from Step H
     still runs meaningfully longer than the box was sized for
 - Shapes whose rewritten text is >1.5x the original length are flagged as
   overflow_risk_ids for Step I, even after the shrink mitigation.
+- FORMAT PRESERVATION (added 2026-09-15): a plain deleteText(ALL)+insertText
+  produces default-styled runs, wiping run/paragraph styling (text colour,
+  font, bold, and — since Slides list glyphs inherit the colour of their
+  paragraph's first run — bullet colour) and any per-word highlight. To stop
+  that clobbering the specialist template's formatting on a re-run:
+  - Shapes the model returns UNCHANGED (normalized whitespace/case compare)
+    emit NO delete/insert at all, so their exact formatting (incl. per-word
+    highlights on static section titles like "YOUR INVESTMENT" where only
+    "INVESTMENT" is highlighted) is preserved untouched. The prompt already
+    tells the model to echo non-client-specific section titles unchanged.
+  - Shapes tagged in alt-text with any PRESERVE_TAG_KEYWORDS
+    ("do-not-rewrite"/"preserve"/"no-rewrite") are never sent to the model
+    and never edited — a hard guarantee for a header the model might reword.
+    (No template currently uses this tag; it's available as opt-in insurance.)
+  - Shapes that ARE rewritten get their dominant text style captured before
+    deletion (foregroundColor, backgroundColor, fontFamily, weightedFontFamily,
+    fontSize, bold, italic — from the first non-empty run) and re-applied via
+    updateTextStyle after insert, with an explicit fields mask (never "*").
+    Restoring foregroundColor is what fixes bullet-glyph colour too. This
+    restores ONE uniform style; it cannot reproduce arbitrary multi-run
+    styling — which is why per-word-highlight headers must fall in the
+    unchanged/tagged buckets above, not the rewritten one.
+  - rewrite() now also returns preserved_shapes and unchanged_shapes counts;
+    text_shapes_updated now means "shapes actually rewritten" (pipeline.py
+    consumes neither, only logo_replaced/overflow_risk_ids — no change there).
+- LIMITATION — the rewriter (and Step H logo finder) only walk a slide's own
+  pageElements; they do NOT touch content on the slide's LAYOUT or master,
+  nor (currently) recurse into element groups. The 2026-09-15 Uncharted Ice
+  template's cover (slide 1) keeps its client logo, tagline, and date on a
+  custom layout, so those are NOT auto-tailored/swapped and are finished by
+  hand per client. Slides 2-13 keep their editable content as slide
+  pageElements and tailor normally.
 
 Step H: Client Logo (src/logo_service.py + src/slides_rewriter.py) —
 isolated in its OWN batchUpdate, deliberately separate from Step G

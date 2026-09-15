@@ -1,5 +1,15 @@
 """Rewrites a duplicated deck's client-specific text via an LLM, and swaps
-the client logo into any image shape tagged as a logo placeholder."""
+the client logo into any image shape tagged as a logo placeholder.
+
+The rewrite is *format-preserving*: a plain delete+insert would silently drop
+every run/paragraph style (text colour, font, bold, and — because Slides list
+glyphs inherit the colour of their paragraph's first run — bullet colour), so
+for each shape that actually changes we capture its dominant text style before
+deleting and re-apply it after inserting. Shapes whose styling is *per-word*
+(e.g. a header where only one word is highlighted) can't be reconstructed from
+a single captured style, so those are excluded from rewriting entirely — either
+because the template author tagged them (see PRESERVE_TAG_KEYWORDS) or because
+the model returned the text unchanged."""
 
 import json
 import logging
@@ -9,6 +19,18 @@ from src import llm_client
 log = logging.getLogger("slides_rewriter")
 
 LOGO_TAG_KEYWORDS = ("logo", "client_logo", "client logo")
+
+# Shapes whose alt-text (title/description) contains any of these are never
+# rewritten, so their exact template formatting — including per-word highlights
+# a uniform re-style can't reproduce — is preserved verbatim. "do-not-rewrite"
+# is the canonical tag; the rest are lenient synonyms. Verify a template's tags
+# with inspect_template.py (it prints each shape's title/desc).
+PRESERVE_TAG_KEYWORDS = ("do-not-rewrite", "do_not_rewrite", "preserve", "no-rewrite")
+
+# Text-style fields copied verbatim from the presentation `get` response into an
+# updateTextStyle request (the JSON shapes match). bold/italic are handled
+# separately (they have well-defined False defaults).
+STYLE_FIELDS = ("foregroundColor", "backgroundColor", "fontFamily", "weightedFontFamily", "fontSize")
 
 REWRITE_TOOL = {
     "name": "rewrite_slide_text",
@@ -60,23 +82,84 @@ def _shape_font_size(element: dict) -> float:
     return None
 
 
+def _is_preserved_shape(element: dict) -> bool:
+    """True when the shape is tagged (via alt-text title/description) to be left
+    unrewritten. Mirrors find_logo_placeholders' label-matching."""
+    label = f"{element.get('title', '')} {element.get('description', '')}".lower()
+    return any(keyword in label for keyword in PRESERVE_TAG_KEYWORDS)
+
+
+def _normalize(text: str) -> str:
+    """Collapse whitespace and casefold, so a model echo that only differs in
+    spacing/case counts as unchanged and skips the destructive rewrite."""
+    return " ".join(text.split()).casefold()
+
+
+def _first_meaningful_run(text_elements: list) -> dict:
+    """The textRun whose style should drive the shape's dominant style: the
+    first run with visible (non-whitespace) content, else the first run with any
+    content, else None (paragraphMarker-only shape)."""
+    fallback = None
+    for te in text_elements:
+        run = te.get("textRun")
+        if run is None or "content" not in run:
+            continue
+        if fallback is None:
+            fallback = run
+        if run["content"].strip():
+            return run
+    return fallback
+
+
+def _capture_dominant_style(element: dict) -> tuple:
+    """Returns (style_dict, fields_mask) capturing the shape's dominant text
+    style for re-application after a delete/insert rewrite, or (None, None) when
+    there's no run to read. Structured fields are copied verbatim (the get-JSON
+    shape is exactly what updateTextStyle expects, themeColor included); a
+    missing field is omitted from both the style and the mask so it isn't reset.
+    bold/italic are always included with a False default."""
+    text_elements = element.get("shape", {}).get("text", {}).get("textElements", [])
+    run = _first_meaningful_run(text_elements)
+    if run is None:
+        return None, None
+    src = run.get("style", {})
+    style = {}
+    fields = []
+    for field in STYLE_FIELDS:
+        value = src.get(field)
+        if value not in (None, {}):
+            style[field] = value
+            fields.append(field)
+    for boolean in ("bold", "italic"):
+        style[boolean] = src.get(boolean, False)
+        fields.append(boolean)
+    return style, ",".join(fields)
+
+
 def extract_text_shapes(presentation: dict) -> list[dict]:
-    """Returns [{object_id, text, has_bullets, font_size}, ...] for every
-    non-empty text shape. `has_bullets` tracks whether the original template
-    paragraph(s) were bullet-formatted, so that formatting can be reapplied
-    after the delete/insert rewrite below (which otherwise wipes it).
-    `font_size` (may be None) backs the overflow-mitigation font shrink."""
+    """Returns [{object_id, text, has_bullets, font_size, preserve, style,
+    style_fields}, ...] for every non-empty text shape. `has_bullets` tracks
+    whether the original paragraph(s) were bullet-formatted so that formatting
+    can be reapplied after the delete/insert rewrite below (which otherwise
+    wipes it). `font_size` (may be None) backs the overflow-mitigation font
+    shrink. `preserve` marks tag-excluded shapes. `style`/`style_fields` (may be
+    None) capture the shape's dominant text style so it can be restored after
+    the rewrite."""
     shapes = []
     for element in _iter_page_elements(presentation):
         if "shape" not in element:
             continue
         text = shape_text(element)
         if text:
+            style, style_fields = _capture_dominant_style(element)
             shapes.append({
                 "object_id": element["objectId"],
                 "text": text,
                 "has_bullets": _shape_has_bullets(element),
                 "font_size": _shape_font_size(element),
+                "preserve": _is_preserved_shape(element),
+                "style": style,
+                "style_fields": style_fields,
             })
     return shapes
 
@@ -96,7 +179,29 @@ def find_logo_placeholders(presentation: dict) -> list[str]:
     return logo_ids
 
 
-def _build_rewrite_requests(shapes: list[dict], ocr_fields: dict) -> list[dict]:
+def _build_style_request(object_id: str, style: dict, fields: str) -> dict:
+    if not style or not fields:
+        return None
+    return {
+        "updateTextStyle": {
+            "objectId": object_id,
+            "textRange": {"type": "ALL"},
+            "style": style,
+            "fields": fields,
+        }
+    }
+
+
+def _build_rewrite_requests(shapes: list[dict], ocr_fields: dict) -> tuple:
+    # Only non-preserved shapes are sent to the model, and only their id+text —
+    # the captured style/preserve metadata stays local (out of the prompt).
+    llm_shapes = [
+        {"object_id": s["object_id"], "text": s["text"]}
+        for s in shapes
+        if not s["preserve"]
+    ]
+    preserved_count = sum(1 for s in shapes if s["preserve"])
+
     content = [
         {
             "type": "input_text",
@@ -121,7 +226,7 @@ def _build_rewrite_requests(shapes: list[dict], ocr_fields: dict) -> list[dict]:
                 "shape (roughly within 10-15%) so it doesn't overflow the box; "
                 "shorten or trim detail rather than exceeding that.\n\n"
                 f"Demo notes:\n{json.dumps(ocr_fields, indent=2)}\n\n"
-                f"Template shapes:\n{json.dumps(shapes, indent=2)}"
+                f"Template shapes:\n{json.dumps(llm_shapes, indent=2)}"
             ),
         }
     ]
@@ -130,10 +235,20 @@ def _build_rewrite_requests(shapes: list[dict], ocr_fields: dict) -> list[dict]:
     shapes_by_id = {s["object_id"]: s for s in shapes}
     requests = []
     rewritten_lengths = {}
+    rewritten_count = 0
+    unchanged_count = 0
     for shape in rewritten:
         object_id = shape["object_id"]
         new_text = shape["new_text"]
         original = shapes_by_id.get(object_id, {})
+        # A preserved shape shouldn't reach here (never sent to the model), but
+        # guard anyway; an unchanged echo skips the destructive delete/insert.
+        if original.get("preserve"):
+            continue
+        if _normalize(new_text) == _normalize(original.get("text", "")):
+            unchanged_count += 1
+            continue
+
         requests.append({"deleteText": {"objectId": object_id, "textRange": {"type": "ALL"}}})
         if new_text:
             requests.append({"insertText": {"objectId": object_id, "insertionIndex": 0, "text": new_text}})
@@ -145,11 +260,26 @@ def _build_rewrite_requests(shapes: list[dict], ocr_fields: dict) -> list[dict]:
                         "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
                     }
                 })
+            # Restore the captured style AFTER re-bulleting so it re-asserts run
+            # colour/font (and thus the inherited bullet colour).
+            style_request = _build_style_request(
+                object_id, original.get("style"), original.get("style_fields")
+            )
+            if style_request:
+                requests.append(style_request)
+            # Overflow shrink goes LAST so its fontSize wins over the restored one.
             shrink_request = _build_shrink_request(object_id, original, new_text)
             if shrink_request:
                 requests.append(shrink_request)
         rewritten_lengths[object_id] = len(new_text)
-    return requests, rewritten_lengths
+        rewritten_count += 1
+
+    counts = {
+        "rewritten": rewritten_count,
+        "preserved": preserved_count,
+        "unchanged": unchanged_count,
+    }
+    return requests, rewritten_lengths, counts
 
 
 SHRINK_TRIGGER_RATIO = 1.15
@@ -193,12 +323,16 @@ FLAG_RATIO = 1.5
 
 
 def rewrite(slides, file_id: str, ocr_fields: dict, logo_url: str = None) -> dict:
-    """Step 5 (part 2): rewrites text (shrinking font size on shapes whose new
-    text runs notably longer than the original, since the Slides API has no
-    working autofit) and swaps the logo. Returns {text_shapes_updated,
-    logo_replaced, overflow_risk_ids} for the pre-send QA check in
-    pipeline.py — overflow_risk_ids flags shapes so much longer than the
-    original that a font shrink alone may not be enough.
+    """Step 5 (part 2): rewrites text (restoring each rewritten shape's captured
+    style, and shrinking font size on shapes whose new text runs notably longer
+    than the original, since the Slides API has no working autofit) and swaps the
+    logo. Returns {text_shapes_updated, preserved_shapes, unchanged_shapes,
+    logo_replaced, overflow_risk_ids} for the pre-send QA check in pipeline.py —
+    text_shapes_updated is the count of shapes actually rewritten;
+    preserved_shapes were tag-excluded and unchanged_shapes were echoed
+    identically (both keep their template formatting untouched);
+    overflow_risk_ids flags shapes so much longer than the original that a font
+    shrink alone may not be enough.
 
     The text rewrite and the logo swap are deliberately sent as two separate
     batchUpdate calls, not one. logo_url is only ever a guessed, unverified
@@ -212,9 +346,9 @@ def rewrite(slides, file_id: str, ocr_fields: dict, logo_url: str = None) -> dic
 
     text_shapes = extract_text_shapes(presentation)
     if text_shapes:
-        text_requests, rewritten_lengths = _build_rewrite_requests(text_shapes, ocr_fields)
+        text_requests, rewritten_lengths, counts = _build_rewrite_requests(text_shapes, ocr_fields)
     else:
-        text_requests, rewritten_lengths = [], {}
+        text_requests, rewritten_lengths, counts = [], {}, {"rewritten": 0, "preserved": 0, "unchanged": 0}
 
     if text_requests:
         slides.presentations().batchUpdate(
@@ -243,7 +377,9 @@ def rewrite(slides, file_id: str, ocr_fields: dict, logo_url: str = None) -> dic
     ]
 
     return {
-        "text_shapes_updated": len(text_shapes),
+        "text_shapes_updated": counts["rewritten"],
+        "preserved_shapes": counts["preserved"],
+        "unchanged_shapes": counts["unchanged"],
         "logo_replaced": logo_replaced,
         "overflow_risk_ids": overflow_risk_ids,
     }
